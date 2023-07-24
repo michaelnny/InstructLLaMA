@@ -1,0 +1,12 @@
+torch>=2.0.0
+sentencepiece
+tqdm  # convert_checkpoint.py
+numpy  # train.py dataset memmap
+
+tensorboard
+
+
+bitsandbytes  # quantization.py
+
+# datasets  # evaluate.py
+# zstandard  # prepare_redpajama.py
