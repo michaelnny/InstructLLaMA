@@ -59,8 +59,8 @@ def build_prompt_completion(
     Note we only build the training target completion if the last role in the dialog is 'assistant'.
 
     Here are some examples of the format that llama-2 uses (before apply tokenization), note we inserted BOS and EOS into the example for completeness:
-    {"prompt": "BOS [INST] <<SYS>>\n{system prompt}\n<</SYS>>\n\n{1st user prompt} [/INST]", "completion": " {1st response} EOS"}
-    {"prompt": "BOS [INST] <<SYS>>\n{system prompt}\n<</SYS>>\n\n{1st user prompt} [/INST] {1st response} EOS BOS[INST] {2nd user prompt} [/INST]", "completion": " {2nd response} EOS"}
+    {"prompt": "<s>[INST] <<SYS>>\n{system prompt}\n<</SYS>>\n\n{1st user prompt} [/INST]", "completion": " {1st response} </s>"}
+    {"prompt": "<s>[INST] <<SYS>>\n{system prompt}\n<</SYS>>\n\n{1st user prompt} [/INST] {1st response} </s><s>[INST] {2nd user prompt} [/INST]", "completion": " {2nd response} </s>"}
 
     """
 
