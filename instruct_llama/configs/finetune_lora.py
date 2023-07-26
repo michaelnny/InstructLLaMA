@@ -28,13 +28,13 @@ class config:
     )
     dataloader_workers: int = 1
 
-    max_seq_len: int = 128  # use smaller sequence length to save GPU RAM
+    max_seq_len: int = 512  # use smaller sequence length to save GPU RAM
 
     # training and validation loops
     # training samples * epochs / batch size, 600000 training samples, with batch size of 120, 4000 iters = one epoch
     max_train_iters: int = 20000
     # accumulate gradients so for each iteration, the actual batch size is = micro_batch_size x gradient_accum_steps
-    micro_batch_size: int = 1
+    micro_batch_size: int = 2
     gradient_accum_steps: int = 5
     val_interval: int = 50
     val_iters: int = 50  # large size since micro_batch_size is very small
@@ -42,16 +42,16 @@ class config:
     ckpt_interval: int = 100  # save model and optionally optimizer checkpoints every N training iterations
 
     # LoRA configuration
-    lora_r: int = 8
-    lora_alpha: int = 16
+    lora_r: int = 16
+    lora_alpha: int = 32
     lora_dropout: float = 0.05
     train_bias: str = "none"  # none, lora_only, all
     train_head: str = "none"  # none, lm_head, scalar_head
 
     # learning rate scheduler
-    init_lr: float = 1e-8  # initial learning rate
-    max_lr: float = 2e-6  # max learning rate when warm up, 0.02 x pre-training learning rate
-    min_lr: float = 2e-7  # min learning rate after decay
+    init_lr: float = 1e-6  # initial learning rate
+    max_lr: float = 2e-4  # max learning rate when warm up, 0.02 x pre-training learning rate
+    min_lr: float = 2e-5  # min learning rate after decay
     warmup_steps: int = 100
     max_decay_steps: int = 20000
 
@@ -84,4 +84,4 @@ class config:
     ckpt_dir: str = "./checkpoints/finetune_lora"
     use_tensorboard: bool = True
     use_profiler: bool = False  # use torch profiler to monitoring traces
-    track_gpu_mem_usage: bool = True  # track GPU memory allocation statistics
+    track_gpu_mem_usage: bool = False  # track GPU memory allocation statistics

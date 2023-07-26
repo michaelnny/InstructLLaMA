@@ -141,11 +141,10 @@ def create_optimizer(
         # Note we use hard-coded names where 'ln' is for LayerNorm, and 'embed' is for Embedding, this works better with FSDP
         if (
             p_name.endswith("bias")
-            or p_name.endswith("ln_1.weight")
-            or p_name.endswith("ln_2.weight")
-            or p_name.endswith("post_ln.weight")
-            or p_name.endswith("position_embed.weight")
-            or p_name.endswith("token_embed.weight")
+            or p_name.endswith("attention_norm.weight")
+            or p_name.endswith("ffn_norm.weight")
+            or p_name.endswith("post_norm.weight")
+            or p_name.endswith("token_embeddings.weight")
         ):
             no_decay.append(params)
         else:
@@ -171,6 +170,7 @@ def create_optimizer(
         optimizer = bnb.optim.AdamW8bit(optim_groups, lr=lr, eps=eps, betas=betas)
     else:
         optimizer = torch.optim.AdamW(optim_groups, lr=lr, eps=eps, betas=betas, fused=fused)
+
     return optimizer
 
 
@@ -217,6 +217,12 @@ def run_single_train_step(
 
         with ctx:  # mixed precision
             output = model(x)
+
+        # with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        #     output = model(x)
+
+        # with torch.cuda.amp.autocast():
+        #     output = model(x)
 
         loss = compute_finetune_loss(output, y, loss_mask)
         # scale the loss to account for gradient accumulation
@@ -284,7 +290,8 @@ def run_validation_steps(ctx, model, rank, world_size, val_loader):
                 loss_mask.to(local_rank, non_blocking=True),
             )
 
-            with ctx:
+            # with ctx:
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 output = model(x)
 
             loss = compute_finetune_loss(output, y, loss_mask)
@@ -386,7 +393,7 @@ def main():
 
     _collate_fn = functools.partial(
         custom_collate_fn,
-        pad_id=0,  # tokenizer.pad_id,
+        pad_id=tokenizer.eos_id,
         max_seq_len=cfg.max_seq_len,
     )
 
@@ -433,7 +440,7 @@ def main():
         model_args = ModelArgs.from_model_type(cfg.model_type)
         model_args.vocab_size = tokenizer.vocab_size
         model_args.head_type = "lm_head"
-        model_args.max_seq_len = cfg.max_seq_len
+        # model_args.max_seq_len = cfg.max_seq_len
         model_args.embed_dropout = cfg.embed_dropout
         model_args.attn_dropout = cfg.attn_dropout
         model_args.resid_dropout = cfg.resid_dropout
@@ -450,18 +457,26 @@ def main():
     mark_only_lora_as_trainable(model, bias=cfg.train_bias, head=cfg.train_head)
 
     # train the model in half percision
-    model = model.half()
-    model = model.to(local_rank)
 
-    scaler = torch.cuda.amp.GradScaler()
+    for p_name, params in model.named_parameters():
+        if p_name.endswith("token_embeddings.weight"): # or p_name.endswith("norm.weight"):
+            params.data = params.data.to(dtype=torch.float32, device=local_rank)
+        else:
+            params.data = params.data.to(dtype=torch.float16, device=local_rank)
+
+    # model = model.to(dtype=torch.float16, device=local_rank)
+
+    scaler = None  # torch.cuda.amp.GradScaler()
 
     bf16_ready = torch.version.cuda and torch.cuda.is_bf16_supported()
 
-    mp_ctx = (
-        torch.autocast(device_type="cuda", dtype=torch.bfloat16 if bf16_ready else torch.float16)
-        if cfg.mixed_precision
-        else nullcontext()
-    )
+    mp_ctx = nullcontext()
+
+    # (
+    #     torch.autocast(device_type="cuda", dtype=torch.bfloat16 if bf16_ready else torch.float16)
+    #     if cfg.mixed_precision
+    #     else nullcontext()
+    # )
 
     if cfg.compile_model:
         logger.info(f"--> compile model using torch.compile() ...")
@@ -591,10 +606,10 @@ if __name__ == "__main__":
     np.random.seed(cfg.seed)
     random.seed(cfg.seed)
 
-    # torch.set_float32_matmul_precision("high")
+    torch.set_float32_matmul_precision("high")
 
-    # torch.backends.cuda.enable_flash_sdp(True)
-    # torch.backends.cuda.enable_mem_efficient_sdp(True)
+    torch.backends.cuda.enable_flash_sdp(False)
+    torch.backends.cuda.enable_mem_efficient_sdp(True)
     # torch.backends.cuda.enable_math_sdp(True)
 
     main()

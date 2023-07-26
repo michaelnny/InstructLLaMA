@@ -152,18 +152,18 @@ class Attention(nn.Module):
         # keys = self.cache_k[:bsz, : start_pos + seqlen]
         # values = self.cache_v[:bsz, : start_pos + seqlen]
 
+        keys = xk
+        values = xv
+
         xq = xq.transpose(1, 2)  # (bs, n_heads, seqlen, head_dim)
-        xk = xk.transpose(1, 2)
-        xv = xv.transpose(1, 2)
-        scores = torch.matmul(xq, xk.transpose(2, 3)) / math.sqrt(self.head_dim)
+        keys = keys.transpose(1, 2)
+        values = values.transpose(1, 2)
+        scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
         if mask is not None:
             scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
         scores = F.softmax(scores.float(), dim=-1).type_as(xq)
-        scores = self.attn_dropout(scores)
-
-        output = torch.matmul(scores, xv)  # (bs, n_local_heads, seqlen, head_dim)
+        output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
-        output = self.wo(output)
 
         return self.resid_dropout(output)
 
@@ -233,7 +233,7 @@ class Transformer(nn.Module):
         self.vocab_size = params.vocab_size
         self.n_layers = params.n_layers
 
-        self.token_embeddings = nn.Embedding(params.vocab_size, params.dim)
+        self.token_embeddings = nn.Embedding(params.vocab_size, params.dim, padding_idx=-1)
 
         self.embeddings_dropout = nn.Dropout(params.embed_dropout)
 
@@ -255,6 +255,9 @@ class Transformer(nn.Module):
         _bsz, seqlen = tokens.shape
         h = self.token_embeddings(tokens)
         h = self.embeddings_dropout(h)
+
+        # if h.dtype == torch.float32:
+        h = h.half()
 
         self.freqs_cis = self.freqs_cis.to(h.device)
         freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]

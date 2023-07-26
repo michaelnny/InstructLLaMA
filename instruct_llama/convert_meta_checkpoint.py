@@ -37,10 +37,10 @@ def convert_state_dict(state_dict: Dict[str, torch.Tensor], dtype: torch.dtype =
         # map Meta's key to our key
         if k == "tok_embeddings.weight":
             our_k = "token_embeddings.weight"
-        elif k == "output.weight":
-            our_k = "lm_head.weight"
         elif k == "norm.weight":
             our_k = "post_norm.weight"
+        elif k == "output.weight":
+            our_k = "lm_head.weight"
 
         converted[our_k] = state_dict[k].to(dtype)
 
