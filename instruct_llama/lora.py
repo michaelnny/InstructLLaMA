@@ -492,7 +492,7 @@ def mark_only_lora_as_trainable(model: nn.Module, bias: str = "none", head: str 
     # freeze all layers except LoRA's, or output head layer
     for n, p in model.named_parameters():
         if "lora_" not in n:
-            if (head == "lm_head" or head == "scalar_head") and head in n:
+            if head != "none" and head in n:
                 p.requires_grad = True
             else:
                 p.requires_grad = False
@@ -616,23 +616,8 @@ class Attention(llama.Attention):
             bias=False,
         )
 
-        # self.cache_k = torch.zeros(
-        #     (
-        #         args.max_batch_size,
-        #         args.max_seq_len,
-        #         self.n_heads,
-        #         self.head_dim,
-        #     )
-        # ).cuda()
-        # self.cache_v = torch.zeros(
-        #     (
-        #         args.max_batch_size,
-        #         args.max_seq_len,
-        #         self.n_heads,
-        #         self.head_dim,
-        #     )
-        # ).cuda()
-
+        self.use_cache = False
+        
         # regularization
         self.resid_dropout = nn.Dropout(args.resid_dropout)
         self.attn_dropout = nn.Dropout(args.attn_dropout)

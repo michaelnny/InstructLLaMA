@@ -1,6 +1,13 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 
+# support running without installing as a package
+from pathlib import Path
+import sys
+
+wd = Path(__file__).parent.parent.resolve()
+sys.path.append(str(wd))
+
 
 from instruct_llama.generation import Llama
 

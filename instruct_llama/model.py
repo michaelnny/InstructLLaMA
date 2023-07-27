@@ -39,6 +39,7 @@ class ModelArgs:
     max_seq_len: int = 2048
 
     head_type: str = "lm_head"  # none, lm_head, scalar_head
+    use_cache: bool = False  # should only use cache when do inference
 
     # used during training
     embed_dropout: float = 0.0
@@ -106,26 +107,28 @@ class Attention(nn.Module):
         self.wv = nn.Linear(args.dim, self.n_heads * self.head_dim, bias=False)
         self.wo = nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
 
-        # self.cache_k = torch.zeros(
-        #     (
-        #         args.max_batch_size,
-        #         args.max_seq_len,
-        #         self.n_heads,
-        #         self.head_dim,
-        #     )
-        # ).cuda()
-        # self.cache_v = torch.zeros(
-        #     (
-        #         args.max_batch_size,
-        #         args.max_seq_len,
-        #         self.n_heads,
-        #         self.head_dim,
-        #     )
-        # ).cuda()
+        self.use_cache = args.use_cache
+        if self.use_cache:
+            self.cache_k = torch.zeros(
+                (
+                    args.max_batch_size,
+                    args.max_seq_len,
+                    self.n_heads,
+                    self.head_dim,
+                )
+            ).cuda()
+            self.cache_v = torch.zeros(
+                (
+                    args.max_batch_size,
+                    args.max_seq_len,
+                    self.n_heads,
+                    self.head_dim,
+                )
+            ).cuda()
 
         # regularization
-        self.resid_dropout = nn.Dropout(args.resid_dropout)
         self.attn_dropout = nn.Dropout(args.attn_dropout)
+        self.resid_dropout = nn.Dropout(args.resid_dropout)
 
     def forward(
         self,
@@ -143,17 +146,19 @@ class Attention(nn.Module):
 
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
-        # self.cache_k = self.cache_k.to(xq)
-        # self.cache_v = self.cache_v.to(xq)
+        if self.use_cache:
+            # should only use cache when do inference
+            self.cache_k = self.cache_k.to(xq)
+            self.cache_v = self.cache_v.to(xq)
 
-        # self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
-        # self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
+            self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
+            self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
 
-        # keys = self.cache_k[:bsz, : start_pos + seqlen]
-        # values = self.cache_v[:bsz, : start_pos + seqlen]
-
-        keys = xk
-        values = xv
+            keys = self.cache_k[:bsz, : start_pos + seqlen]
+            values = self.cache_v[:bsz, : start_pos + seqlen]
+        else:
+            keys = xk
+            values = xv
 
         xq = xq.transpose(1, 2)  # (bs, n_heads, seqlen, head_dim)
         keys = keys.transpose(1, 2)
@@ -162,10 +167,14 @@ class Attention(nn.Module):
         if mask is not None:
             scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
         scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+        scores = self.attn_dropout(scores)
+
         output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
+        output = self.wo(output)
+        output = self.resid_dropout(output)
 
-        return self.resid_dropout(output)
+        return output
 
 
 class FeedForward(nn.Module):
@@ -192,8 +201,9 @@ class FeedForward(nn.Module):
 
     def forward(self, x):
         output = self.w2(F.silu(self.w1(x)) * self.w3(x))
+        output = self.resid_dropout(output)
 
-        return self.resid_dropout(output)
+        return output
 
 
 class TransformerBlock(nn.Module):
@@ -250,14 +260,10 @@ class Transformer(nn.Module):
 
         self.freqs_cis = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.max_seq_len * 2)
 
-
     def forward(self, tokens: torch.Tensor, start_pos: int = 0) -> torch.Tensor:
         _bsz, seqlen = tokens.shape
         h = self.token_embeddings(tokens)
         h = self.embeddings_dropout(h)
-
-        # if h.dtype == torch.float32:
-        h = h.half()
 
         self.freqs_cis = self.freqs_cis.to(h.device)
         freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]

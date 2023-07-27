@@ -3,10 +3,18 @@ import gc
 import shutil
 from pathlib import Path
 from typing import Dict, Any
-import time
 
 import torch
 from tqdm import tqdm
+
+
+# support running without installing as a package
+from pathlib import Path
+import sys
+
+wd = Path(__file__).parent.parent.resolve()
+sys.path.append(str(wd))
+
 
 from instruct_llama.model import Transformer, ModelArgs
 

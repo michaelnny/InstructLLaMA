@@ -11,12 +11,13 @@ from typing import List, Literal, Optional, Tuple, TypedDict
 import torch
 import torch.nn.functional as F
 
-# # support running without installing as a package
-# from pathlib import Path
-# import sys
+# support running without installing as a package
+from pathlib import Path
+import sys
 
-# wd = Path(__file__).parent.parent.resolve()
-# sys.path.append(str(wd))
+wd = Path(__file__).parent.parent.resolve()
+sys.path.append(str(wd))
+
 
 from instruct_llama.model import ModelArgs, Transformer
 from instruct_llama.tokenizer import Tokenizer
@@ -25,42 +26,8 @@ from instruct_llama.utils import (
     Dialog,
     ChatPrediction,
     CompletionPrediction,
-    B_INST,
-    E_INST,
-    B_SYS,
-    E_SYS,
-    DEFAULT_SYSTEM_PROMPT,
     build_prompt_completion,
 )
-
-# Role = Literal["system", "user", "assistant"]
-
-
-# class Message(TypedDict):
-#     role: Role
-#     content: str
-
-
-# class CompletionPrediction(TypedDict, total=False):
-#     generation: str
-#     tokens: List[str]  # not required
-#     logprobs: List[float]  # not required
-
-
-# class ChatPrediction(TypedDict, total=False):
-#     generation: Message
-#     tokens: List[str]  # not required
-#     logprobs: List[float]  # not required
-
-
-# Dialog = List[Message]
-
-# B_INST, E_INST = "[INST]", "[/INST]"
-# B_SYS, E_SYS = "<<SYS>>\n", "\n<</SYS>>\n\n"
-# DEFAULT_SYSTEM_PROMPT = """\
-# You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe. Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.
-
-# If a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."""
 
 
 class Llama:
@@ -90,6 +57,7 @@ class Llama:
         model_args: ModelArgs = ModelArgs(
             max_seq_len=max_seq_len,
             max_batch_size=max_batch_size,
+            use_cache=True,
             **params,
         )
         tokenizer = Tokenizer(model_path=tokenizer_path)
@@ -137,6 +105,7 @@ class Llama:
         input_text_mask = tokens != pad_id
         for cur_pos in range(min_prompt_len, total_len):
             logits = self.model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
+            # logits = self.model.forward(tokens[:, 0:cur_pos], 0) # without model cache
             if logprobs:
                 token_logprobs[:, prev_pos + 1 : cur_pos + 1] = -F.cross_entropy(
                     input=logits.transpose(1, 2),

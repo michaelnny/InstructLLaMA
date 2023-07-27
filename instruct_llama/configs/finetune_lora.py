@@ -28,32 +28,32 @@ class config:
     )
     dataloader_workers: int = 1
 
-    max_seq_len: int = 512  # use smaller sequence length to save GPU RAM
+    max_seq_len: int = 450  # use smaller sequence length to save GPU RAM
 
     # training and validation loops
-    # training samples * epochs / batch size, 600000 training samples, with batch size of 120, 4000 iters = one epoch
-    max_train_iters: int = 20000
+    # training samples * epochs / batch size, 70000 training samples, with batch size of 128, 550 iters = one epoch
+    max_train_iters: int = 5500
     # accumulate gradients so for each iteration, the actual batch size is = micro_batch_size x gradient_accum_steps
     micro_batch_size: int = 2
-    gradient_accum_steps: int = 5
-    val_interval: int = 50
-    val_iters: int = 50  # large size since micro_batch_size is very small
-    log_interval: int = 20  # log training metrics (loss, accuracy)
-    ckpt_interval: int = 100  # save model and optionally optimizer checkpoints every N training iterations
+    gradient_accum_steps: int = 64
+    val_interval: int = 550
+    val_iters: int = 200  # large size since micro_batch_size is very small
+    log_interval: int = 100  # log training metrics (loss, accuracy)
+    ckpt_interval: int = 550  # save model checkpoints every N training iterations
 
     # LoRA configuration
     lora_r: int = 16
     lora_alpha: int = 32
-    lora_dropout: float = 0.05
-    train_bias: str = "none"  # none, lora_only, all
-    train_head: str = "none"  # none, lm_head, scalar_head
+    lora_dropout: float = 0.1
+    train_bias: str = "lora_only"  # none, lora_only, all
+    train_head: str = "lm_head"  # none, lm_head, scalar_head
 
     # learning rate scheduler
-    init_lr: float = 1e-6  # initial learning rate
+    init_lr: float = 2e-6  # initial learning rate
     max_lr: float = 2e-4  # max learning rate when warm up, 0.02 x pre-training learning rate
     min_lr: float = 2e-5  # min learning rate after decay
     warmup_steps: int = 100
-    max_decay_steps: int = 20000
+    max_decay_steps: int = 5500
 
     # prompt is less important than completion
     prompt_loss_weight: float = 0.01
@@ -76,7 +76,7 @@ class config:
 
     # training speed improvement
     mixed_precision: bool = True  # try BF16, but will use FP16 if GPU not support
-    compile_model: bool = False  # not support python 3.11 yet
+    compile_model: bool = False
 
     # others
     seed: int = 127

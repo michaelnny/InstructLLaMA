@@ -215,14 +215,8 @@ def run_single_train_step(
             loss_mask.to(local_rank, non_blocking=True),
         )
 
-        with ctx:  # mixed precision
+        with ctx:
             output = model(x)
-
-        # with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-        #     output = model(x)
-
-        # with torch.cuda.amp.autocast():
-        #     output = model(x)
 
         loss = compute_finetune_loss(output, y, loss_mask)
         # scale the loss to account for gradient accumulation
@@ -449,7 +443,7 @@ def main():
 
         # Load model checkpoint before passing into FSDP
         if os.path.exists(cfg.pretrain_ckpt_file):
-            logger.info(f"--> load pretrained checkpoint {cfg.pretrain_ckpt_file}")
+            logger.info(f"--> loading pretrained checkpoint {cfg.pretrain_ckpt_file}")
             ckpt_state = torch.load(cfg.pretrain_ckpt_file)
             # strict=False because missing keys due to LoRA weights not contained in checkpoint state
             model.load_state_dict(ckpt_state, strict=False)
@@ -458,21 +452,21 @@ def main():
 
     # train the model in half percision
 
-    for p_name, params in model.named_parameters():
-        if p_name.endswith("token_embeddings.weight"): # or p_name.endswith("norm.weight"):
-            params.data = params.data.to(dtype=torch.float32, device=local_rank)
-        else:
-            params.data = params.data.to(dtype=torch.float16, device=local_rank)
-
-    # model = model.to(dtype=torch.float16, device=local_rank)
-
-    scaler = None  # torch.cuda.amp.GradScaler()
+    # for p_name, params in model.named_parameters():
+    #     if p_name.endswith("token_embeddings.weight"):
+    #         params.data = params.data.to(dtype=torch.float32, device=local_rank)
+    #     else:
+    #         params.data = params.data.to(dtype=torch.float16, device=local_rank)
 
     bf16_ready = torch.version.cuda and torch.cuda.is_bf16_supported()
 
+    model = model.to(dtype=torch.bfloat16 if bf16_ready else torch.float16, device=local_rank)
+
+    scaler = None
     mp_ctx = nullcontext()
 
-    # (
+    # scaler = torch.cuda.amp.GradScaler()
+    # mp_ctx = (
     #     torch.autocast(device_type="cuda", dtype=torch.bfloat16 if bf16_ready else torch.float16)
     #     if cfg.mixed_precision
     #     else nullcontext()
@@ -572,7 +566,7 @@ def main():
             # save model state
             checkpoint = lora_state_dict(model, bias=cfg.train_bias, head=cfg.train_head)
 
-            torch.save(checkpoint, os.path.join(cfg.ckpt_dir, f"lora_{cfg.model_type}-iter-{iter}.pt"))
+            torch.save(checkpoint, os.path.join(cfg.ckpt_dir, f"lora_{cfg.model_type}-iter-{iter}.pth"))
 
         # validation steps
         if cfg.val_iters > 0 and (cfg.val_interval > 0 and iter % cfg.val_interval == 0 or iter == cfg.max_train_iters):
