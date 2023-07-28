@@ -12,6 +12,14 @@ import random
 import pickle
 import torch
 
+# support running without installing as a package
+from pathlib import Path
+import sys
+
+wd = Path(__file__).parent.parent.resolve()
+sys.path.append(str(wd))
+
+
 from instruct_llama.tokenizer import Tokenizer
 
 from instruct_llama.utils import (
@@ -85,7 +93,7 @@ def process_dolly_dataset(
     """Process dolly dataset and save the tokenized prompt:completion pairs to .pkl format.
 
     Here's an example format of prompt:completion pair before apply tokenization:
-    {"prompt": "BOS [INST] <<SYS>>\n{system prompt}\n<</SYS>>\n\n{1st user prompt} [/INST]", "completion": " {1st response} EOS"}
+    {"prompt": "<s>[INST] <<SYS>>\n{system prompt}\n<</SYS>>\n\n{1st user prompt} [/INST]", "completion": " {1st response} </s>"}
 
     """
 
@@ -185,7 +193,7 @@ def process_alpaca_dataset(
     """Process alpaca dataset and save the tokenized prompt:completion pairs to .pkl format.
 
     Here's an example format of prompt:completion pair before apply tokenization:
-    {"prompt": "BOS [INST] <<SYS>>\n{system prompt}\n<</SYS>>\n\n{1st user prompt} [/INST]", "completion": " {1st response} EOS"}
+    {"prompt": "<s>[INST] <<SYS>>\n{system prompt}\n<</SYS>>\n\n{1st user prompt} [/INST]", "completion": " {1st response} </s>"}
 
     """
 
@@ -305,7 +313,7 @@ def process_deepmind_math_dataset(
     src_dirs,
     output_dir,
     tokenizer: Tokenizer,
-    filter_by_keys=[],  # only include files matching the keys defined here, if empty all files will be used
+    filter_by_names=[],  # only include files matching the keys defined here, if empty all files will be used
     num_workers=8,
     max_num_sample=20000,  # limit total amount of samples to avoid imbalanced training data
     validation_ratio=0.05,
@@ -315,7 +323,7 @@ def process_deepmind_math_dataset(
     """Process DeepMind Mathematics dataset and save the tokenized prompt:completion pairs to .pkl format.
 
     Here's an example format of prompt:completion pair before apply tokenization:
-    {"prompt": "BOS [INST] <<SYS>>\n{system prompt}\n<</SYS>>\n\n{1st user prompt} [/INST]", "completion": " {1st response} EOS"}
+    {"prompt": "<s>[INST] <<SYS>>\n{system prompt}\n<</SYS>>\n\n{1st user prompt} [/INST]", "completion": " {1st response} </s>"}
 
     """
     assert len(src_dirs) > 0
@@ -331,14 +339,14 @@ def process_deepmind_math_dataset(
         all_files.extend(find_certain_files_under_dir(src_dir, file_type=".txt"))
 
     # filter out file name not contain the keys
-    if len(filter_by_keys) > 0:
+    if len(filter_by_names) > 0:
         logger.info(
-            f"Filter {len(all_files)} .txt files by key words {filter_by_keys} ..."
+            f"Filter {len(all_files)} .txt files by file names {filter_by_names} ..."
         )
         for file in all_files:
             basename = os.path.basename(file)
-            for k in filter_by_keys:
-                if basename.startswith(k):
+            for k in filter_by_names:
+                if basename == k:
                     working_files.append(file)
                     break
     else:
@@ -408,6 +416,8 @@ def process_deepmind_math_dataset(
     if len(datasets) > max_num_sample:
         logger.info(f"Truncate data to max size of {max_num_sample}")
         random.shuffle(datasets)
+        random.shuffle(datasets)
+        random.shuffle(datasets)
         datasets = datasets[:max_num_sample]
 
     logger.info("Start to save processed DeepMind Mathematics dataset...")
@@ -422,7 +432,7 @@ def process_deepmind_math_dataset(
 
 
 if __name__ == "__main__":
-    tokenizer = Tokenizer(model_path="/home/michael/llama-2/tokenizer.model")
+    tokenizer = Tokenizer(model_path="./checkpoints/llama-2/tokenizer.model")
 
     process_dolly_dataset(
         src_file="./raw_data/databricks-dolly-15k.jsonl",
@@ -453,11 +463,11 @@ if __name__ == "__main__":
         output_dir="./datasets/deepmind_mathematics",
         tokenizer=tokenizer,
         overwrite_output=True,
-        filter_by_keys=[
-            "arithmetic__add_or_sub",
-            "arithmetic__add_sub_multiple",
-            "arithmetic__div",
-            "arithmetic__mul",
+        filter_by_names=[
+            "arithmetic__add_or_sub.txt",
+            "arithmetic__add_sub_multiple.txt",
+            "arithmetic__div.txt",
+            "arithmetic__mul.txt",
         ],
         metadata={
             "name": "DeepMind Mathematics - arithmetic easy",

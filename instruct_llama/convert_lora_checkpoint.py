@@ -65,9 +65,10 @@ def merge_lora_checkpoint(
     # find the rank from LoRA checkpoint
     rank = lora_model_lookup(lora_checkpoint)
 
-    with lora(r=16, alpha=32, dropout=0.0, enabled=True):
+    assert rank == 32
+
+    with lora(r=rank, alpha=16, dropout=0.0, enabled=True):
         model_args = ModelArgs.from_model_type(model_type)
-        model_args.vocab_size = 32000
 
         model = Transformer(model_args)
 
@@ -86,7 +87,7 @@ def merge_lora_checkpoint(
 if __name__ == "__main__":
     merge_lora_checkpoint(
         model_type="7B",
-        lora_ckpt_path="./checkpoints/finetune_lora/lora_7B-iter-1000.pth",
+        lora_ckpt_path="./checkpoints/finetune_lora/lora_7B-iter-1600.pth",
         pretrained_ckpt_path="./checkpoints/llama-2/llama-2-7b/consolidated.pth",
-        save_path="./checkpoints/llama-2-7b-finetune-iter-1000-merged.pth",
+        save_path="./checkpoints/7b-finetune/iter-1600-merged.pth",
     )

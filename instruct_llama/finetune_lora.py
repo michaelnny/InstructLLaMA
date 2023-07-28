@@ -155,8 +155,8 @@ def create_optimizer(
     total_num_params = sum(p.numel() for p in params_dict.values())
     assert num_decay_params + num_nodecay_params == total_num_params
 
-    print(f"--> num decayed parameter tensors: {len(decay)}, with {num_decay_params:,} parameters")
-    print(f"--> num non-decayed parameter tensors: {len(no_decay)}, with {num_nodecay_params:,} parameters")
+    print(f"num decayed parameter tensors: {len(decay)}, with {num_decay_params:,} parameters")
+    print(f"num non-decayed parameter tensors: {len(no_decay)}, with {num_nodecay_params:,} parameters")
 
     # create the pytorch optimizer object
     optim_groups = [
@@ -267,14 +267,14 @@ def run_single_train_step(
 
 
 def run_validation_steps(ctx, model, rank, world_size, val_loader):
-    """Run M evaluation iterations"""
-    model.eval()  # set model in evaluation mode
+    """Run M validation iterations"""
+    model.eval()  # set model in validation mode
 
     local_rank = int(os.environ["LOCAL_RANK"])
 
     fsdp_metrics = torch.zeros(5).to(local_rank)
 
-    inner_pbar = tqdm.tqdm(range(cfg.val_iters), colour="green", desc="Evaluation iterations")
+    inner_pbar = tqdm.tqdm(range(cfg.val_iters), colour="green", desc="validation iterations")
 
     with torch.no_grad():
         for x, y, loss_mask in itertools.islice(val_loader, cfg.val_iters):
@@ -306,7 +306,7 @@ def run_validation_steps(ctx, model, rank, world_size, val_loader):
 
     inner_pbar.close()
 
-    model.train()  # set model in training mode after evaluation runs
+    model.train()  # set model in training mode after validation runs
 
     return {"loss": val_loss.item(), "accuracy": val_accuracy.item(), 'perplexity': val_perplexity.item()}
 
@@ -381,7 +381,7 @@ def main():
 
     # --------------- Load datasets ---------------
 
-    logger.info("\nLoading datasets ...")
+    logger.info("Loading datasets ...")
 
     tokenizer = Tokenizer(cfg.tokenizer_file)
 
@@ -409,7 +409,7 @@ def main():
 
     train_loader = DataLoader(train_dataset, **train_kwargs)
 
-    logger.info(f"--> Train dataset metadata:\n{train_dataset.get_metadata()}")
+    logger.info(f"Train dataset metadata:\n{train_dataset.get_metadata()}")
 
     # create validation dataset
     val_loader = None
@@ -421,11 +421,11 @@ def main():
 
         val_loader = DataLoader(val_dataset, **val_kwargs)
 
-        logger.info(f"--> Evaluation dataset metadata:\n{val_dataset.get_metadata()}")
+        logger.info(f"Validation dataset metadata:\n{val_dataset.get_metadata()}")
 
     # --------------- Setup model and optimizer ---------------
 
-    logger.info("\nInitialize model and optimizer ...")
+    logger.info("Initialize model and optimizer ...")
 
     torch.cuda.set_device(local_rank)
     clear_gpu_cache(local_rank)
@@ -433,50 +433,53 @@ def main():
     with lora(r=cfg.lora_r, alpha=cfg.lora_alpha, dropout=cfg.lora_dropout, enabled=True):
         model_args = ModelArgs.from_model_type(cfg.model_type)
         model_args.vocab_size = tokenizer.vocab_size
-        model_args.head_type = "lm_head"
-        # model_args.max_seq_len = cfg.max_seq_len
+        model_args.max_seq_len = cfg.max_seq_len
         model_args.embed_dropout = cfg.embed_dropout
         model_args.attn_dropout = cfg.attn_dropout
         model_args.resid_dropout = cfg.resid_dropout
+        model_args.head_type = cfg.head_type
+
+        assert model_args.head_type == "lm_head"
 
         model = Transformer(model_args)
 
-        # Load model checkpoint before passing into FSDP
+        # Load model checkpoint using strict=False,
+        # because there are missing keys due to LoRA weights not contained in checkpoint state
         if os.path.exists(cfg.pretrain_ckpt_file):
-            logger.info(f"--> loading pretrained checkpoint {cfg.pretrain_ckpt_file}")
+            logger.info(f"Loading pretrained checkpoint {cfg.pretrain_ckpt_file} ...")
             ckpt_state = torch.load(cfg.pretrain_ckpt_file)
-            # strict=False because missing keys due to LoRA weights not contained in checkpoint state
             model.load_state_dict(ckpt_state, strict=False)
 
     mark_only_lora_as_trainable(model, bias=cfg.train_bias, head=cfg.train_head)
 
-    # train the model in half percision
-
-    # for p_name, params in model.named_parameters():
-    #     if p_name.endswith("token_embeddings.weight"):
-    #         params.data = params.data.to(dtype=torch.float32, device=local_rank)
-    #     else:
-    #         params.data = params.data.to(dtype=torch.float16, device=local_rank)
-
+    # try to convert the model to half percision, otherwise we can't even move the 7B model to a single RTX 3090
     bf16_ready = torch.version.cuda and torch.cuda.is_bf16_supported()
+    train_dtype = torch.float32
+    if cfg.mixed_precision:
+        if bf16_ready:
+            train_dtype = torch.bfloat16
+        else:
+            train_dtype = torch.float16
+    else:
+        logger.warning("Training in float32 mode, make sure you have enough GPU RAM")
 
-    model = model.to(dtype=torch.bfloat16 if bf16_ready else torch.float16, device=local_rank)
+    for name, module in model.named_modules():
+        if 'norm' in name:  # for better performance, always use full percision for normalization layers
+            module = module.to(dtype=torch.float32)
+        else:
+            module = module.to(dtype=train_dtype)
 
+    model = model.to(local_rank)
+
+    # we found out using torch.autocast will increase GPU RAM usage as we can't run the training on a single RTX 3090
     scaler = None
     mp_ctx = nullcontext()
 
-    # scaler = torch.cuda.amp.GradScaler()
-    # mp_ctx = (
-    #     torch.autocast(device_type="cuda", dtype=torch.bfloat16 if bf16_ready else torch.float16)
-    #     if cfg.mixed_precision
-    #     else nullcontext()
-    # )
-
     if cfg.compile_model:
-        logger.info(f"--> compile model using torch.compile() ...")
+        logger.info(f"compile model using torch.compile() ...")
         model = torch.compile(model)
 
-    logger.info("\nInitialize optimizer ...")
+    logger.info("Initialize optimizer ...")
 
     optimizer = create_optimizer(
         model=model,
@@ -574,14 +577,14 @@ def main():
 
             if rank == 0:
                 logger.info(
-                    f'Training iteration {iter}: evaluation loss: {val_stats["loss"]:.4f}, '
-                    f'evaluation accuracy: {val_stats["accuracy"]:.2f}%, evaluation perplexity: {val_stats["perplexity"]:.2f}'
+                    f'Training iteration {iter}: validation loss: {val_stats["loss"]:.4f}, '
+                    f'validation accuracy: {val_stats["accuracy"]:.2f}%, validation perplexity: {val_stats["perplexity"]:.2f}'
                 )
 
                 if tb_writer is not None:
-                    tb_writer.add_scalar("eval/loss", val_stats["loss"], iter)
-                    tb_writer.add_scalar("eval/accuracy", val_stats["accuracy"], iter)
-                    tb_writer.add_scalar("eval/perplexity", val_stats["perplexity"], iter)
+                    tb_writer.add_scalar("val/loss", val_stats["loss"], iter)
+                    tb_writer.add_scalar("val/accuracy", val_stats["accuracy"], iter)
+                    tb_writer.add_scalar("val/perplexity", val_stats["perplexity"], iter)
 
     if rank == 0:
         # training is done...show some training stats.

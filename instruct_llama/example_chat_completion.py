@@ -31,6 +31,7 @@ def main(
         device="cuda",
     )
 
+    # Meta fine-tuned chat model
     dialogs = [
         [{"role": "user", "content": "what is the recipe of mayonnaise?"}],
         [
@@ -60,6 +61,23 @@ These are just a few of the many attractions that Paris has to offer. With so mu
             {"role": "user", "content": "How to go from Beijing to NY?"},
         ],
     ]
+
+    # # our fine-tuned instruction model
+    # dialogs = [
+    #     [
+    #         {"role": "user", "content": "Tell me a joke about a dog."},
+    #     ],
+    #     [
+    #         {"role": "user", "content": "What is the meaning of life?"},
+    #     ],
+    #     [
+    #         {"role": "user", "content": "Explain what is the theory of relativity."},
+    #     ],
+    #     [
+    #         {"role": "user", "content": "Who is John F. Kennedy?"},
+    #     ],
+    # ]
+
     results = generator.chat_completion(
         dialogs,  # type: ignore
         max_gen_len=max_gen_len,
@@ -70,14 +88,13 @@ These are just a few of the many attractions that Paris has to offer. With so mu
     for dialog, result in zip(dialogs, results):
         for msg in dialog:
             print(f"{msg['role'].capitalize()}: {msg['content']}\n")
-        print(
-            f"> {result['generation']['role'].capitalize()}: {result['generation']['content']}"
-        )
+        print(f"> {result['generation']['role'].capitalize()}: {result['generation']['content']}")
         print("\n==================================\n")
 
 
 if __name__ == "__main__":
     main(
-        ckpt_dir="./checkpoints/llama-2/llama-2-7b-chat",
+        # ckpt_dir="./checkpoints/llama-2/llama-2-7b-chat", # Meta fine-tuned chat model
+        ckpt_dir="./checkpoints/7b-finetune",  # our fine-tuned chat model
         tokenizer_path="./checkpoints/llama-2/tokenizer.model",
     )

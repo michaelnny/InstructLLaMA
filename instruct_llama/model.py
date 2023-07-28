@@ -63,8 +63,8 @@ class RMSNorm(torch.nn.Module):
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
     def forward(self, x):
-        output = self._norm(x.float()).type_as(x)
-        return output * self.weight
+        output = self._norm(x.float())
+        return (output * self.weight).type_as(x)
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
