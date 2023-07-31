@@ -13,7 +13,7 @@ class Tokenizer:
     def __init__(self, model_path: Path) -> None:
         assert os.path.isfile(model_path), model_path
         self.sp_model = SentencePieceProcessor(model_file=model_path)
-        logger.info(f"Reloaded SentencePiece model from {model_path}")
+        logger.info(f'Reloaded SentencePiece model from {model_path}')
 
         # BOS / EOS token IDs
         self.vocab_size: int = self.sp_model.vocab_size()
@@ -22,25 +22,23 @@ class Tokenizer:
         self.pad_id: int = self.sp_model.pad_id()
         self.unk_id: int = self.sp_model.unk_id()
 
-        logger.info(
-            f"#words: {self.vocab_size} - BOS ID: {self.bos_id} - EOS ID: {self.eos_id}"
-        )
+        logger.info(f'#words: {self.vocab_size}, BOS ID: {self.bos_id}, EOS ID: {self.eos_id}, PAD ID: {self.pad_id}')
         assert self.sp_model.vocab_size() == self.sp_model.get_piece_size()
 
     @property
     def special_tokens(self) -> Mapping[Text, Any]:
         return {
-            "unk": {
-                "id": self.unk_id,
-                "piece": self.sp_model.IdToPiece(self.unk_id),
+            'unk': {
+                'id': self.unk_id,
+                'piece': self.sp_model.IdToPiece(self.unk_id),
             },
-            "bos": {
-                "id": self.bos_id,
-                "piece": self.sp_model.IdToPiece(self.bos_id),
+            'bos': {
+                'id': self.bos_id,
+                'piece': self.sp_model.IdToPiece(self.bos_id),
             },
-            "eos": {
-                "id": self.eos_id,
-                "piece": self.sp_model.IdToPiece(self.eos_id),
+            'eos': {
+                'id': self.eos_id,
+                'piece': self.sp_model.IdToPiece(self.eos_id),
             },
         }
 
@@ -69,7 +67,5 @@ class Tokenizer:
 
     @staticmethod
     def train(input: str, destination: str, vocab_size=32000) -> None:
-        model_prefix = os.path.join(destination, "tokenizer")
-        SentencePieceTrainer.Train(
-            input=input, model_prefix=model_prefix, vocab_size=vocab_size
-        )
+        model_prefix = os.path.join(destination, 'tokenizer')
+        SentencePieceTrainer.Train(input=input, model_prefix=model_prefix, vocab_size=vocab_size)

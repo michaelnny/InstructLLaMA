@@ -112,7 +112,7 @@ class Embedding(nn.Embedding, LoRALayer):
 
     def reset_parameters(self):
         nn.Embedding.reset_parameters(self)
-        if hasattr(self, "lora_A"):
+        if hasattr(self, 'lora_A'):
             # initialize A the same way as the default for nn.Linear and B to zero
             nn.init.zeros_(self.lora_A)
             nn.init.normal_(self.lora_B)
@@ -186,7 +186,7 @@ class Linear(nn.Linear, LoRALayer):
 
     def reset_parameters(self):
         nn.Linear.reset_parameters(self)
-        if hasattr(self, "lora_A"):
+        if hasattr(self, 'lora_A'):
             # initialize A the same way as the default for nn.Linear and B to zero
             nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
             nn.init.zeros_(self.lora_B)
@@ -273,7 +273,7 @@ class MergedLinear(nn.Linear, LoRALayer):
             lora_dropout=lora_dropout,
             merge_weights=merge_weights,
         )
-        assert out_features % len(enable_lora) == 0, "The length of enable_lora must divide out_features"
+        assert out_features % len(enable_lora) == 0, 'The length of enable_lora must divide out_features'
         self.enable_lora = enable_lora
         self.fan_in_fan_out = fan_in_fan_out
 
@@ -329,7 +329,7 @@ class MergedLinear(nn.Linear, LoRALayer):
     def reset_parameters(self):
         """Reset all the weights, even including pretrained ones."""
         nn.Linear.reset_parameters(self)
-        if hasattr(self, "lora_A"):
+        if hasattr(self, 'lora_A'):
             # initialize A the same way as the default for nn.Linear and B to zero
             # Wondering why 'a' is equal to math.sqrt(5)?: https://github.com/pytorch/pytorch/issues/15314
             nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
@@ -466,7 +466,7 @@ class MergedLinear(nn.Linear, LoRALayer):
             return result
 
 
-def mark_only_lora_as_trainable(model: nn.Module, bias: str = "none", head: str = "none") -> None:
+def mark_only_lora_as_trainable(model: nn.Module, bias: str = 'none', head: str = 'none') -> None:
     """Freeze all modules except LoRA's and depending on 'bias' value unfreezes bias weights.
 
     Args:
@@ -484,33 +484,33 @@ def mark_only_lora_as_trainable(model: nn.Module, bias: str = "none", head: str 
         NotImplementedError: if `bias` not in ["none", "lora_only", "all"], or `head` not in ["none", "lm_head", "scalar_head"]
     """
 
-    if bias not in ["none", "lora_only", "all"]:
+    if bias not in ['none', 'lora_only', 'all']:
         raise NotImplementedError
-    if head not in ["none", "lm_head", "scalar_head"]:
+    if head not in ['none', 'lm_head', 'scalar_head']:
         raise NotImplementedError
 
     # freeze all layers except LoRA's, or output head layer
     for n, p in model.named_parameters():
-        if "lora_" not in n:
-            if head != "none" and head in n:
+        if 'lora_' not in n:
+            if head != 'none' and head in n:
                 p.requires_grad = True
             else:
                 p.requires_grad = False
 
     # depending on the `bias` value unfreeze bias weights
-    if bias == "none":
+    if bias == 'none':
         return
-    elif bias == "all":
+    elif bias == 'all':
         for n, p in model.named_parameters():
-            if "bias" in n:
+            if 'bias' in n:
                 p.requires_grad = True
-    elif bias == "lora_only":
+    elif bias == 'lora_only':
         for m in model.modules():
-            if isinstance(m, LoRALayer) and hasattr(m, "bias") and m.bias is not None:
+            if isinstance(m, LoRALayer) and hasattr(m, 'bias') and m.bias is not None:
                 m.bias.requires_grad = True
 
 
-def lora_state_dict(model: nn.Module, bias: str = "none", head: str = "none") -> Dict[str, torch.Tensor]:
+def lora_state_dict(model: nn.Module, bias: str = 'none', head: str = 'none') -> Dict[str, torch.Tensor]:
     """Return state_dict with weights of LoRA's A and B matrices and with biases depending on the `bias` value.
 
     Args:
@@ -531,25 +531,25 @@ def lora_state_dict(model: nn.Module, bias: str = "none", head: str = "none") ->
         NotImplementedError: if `bias` not in ["none", "lora_only", "all"], or `head` not in ["none", "lm_head", "scalar_head"]
     """
 
-    if bias not in ["none", "lora_only", "all"]:
+    if bias not in ['none', 'lora_only', 'all']:
         raise NotImplementedError
-    if head not in ["none", "lm_head", "scalar_head"]:
+    if head not in ['none', 'lm_head', 'scalar_head']:
         raise NotImplementedError
 
     my_state_dict = model.state_dict()
-    if bias == "none":
-        return {k: my_state_dict[k] for k in my_state_dict if "lora_" in k or (head != "none" and head in k)}
-    elif bias == "all":
-        return {k: my_state_dict[k] for k in my_state_dict if "lora_" in k or "bias" in k or (head != "none" and head in k)}
-    elif bias == "lora_only":
+    if bias == 'none':
+        return {k: my_state_dict[k] for k in my_state_dict if 'lora_' in k or (head != 'none' and head in k)}
+    elif bias == 'all':
+        return {k: my_state_dict[k] for k in my_state_dict if 'lora_' in k or 'bias' in k or (head != 'none' and head in k)}
+    elif bias == 'lora_only':
         to_return = {}
         for k in my_state_dict:
-            if "lora_" in k:
+            if 'lora_' in k:
                 to_return[k] = my_state_dict[k]
-                bias_name = k.split("lora_")[0] + "bias"
+                bias_name = k.split('lora_')[0] + 'bias'
                 if bias_name in my_state_dict:
                     to_return[bias_name] = my_state_dict[bias_name]
-            elif head != "none" and head in k:
+            elif head != 'none' and head in k:
                 to_return[k] = my_state_dict[k]
 
         return to_return
@@ -617,7 +617,6 @@ class Attention(llama.Attention):
         )
 
         self.use_cache = False
-        
         # regularization
         self.resid_dropout = nn.Dropout(args.resid_dropout)
         self.attn_dropout = nn.Dropout(args.attn_dropout)

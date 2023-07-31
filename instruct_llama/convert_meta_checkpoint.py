@@ -1,7 +1,6 @@
 import json
 import gc
 import shutil
-from pathlib import Path
 from typing import Dict, Any
 
 import torch
@@ -37,18 +36,18 @@ def convert_state_dict(state_dict: Dict[str, torch.Tensor], dtype: torch.dtype =
 
     for k in state_dict.keys():
         # skip this as we don't it in our model
-        if k == "rope.freqs":
+        if k == 'rope.freqs':
             continue
 
         our_k = k
 
         # map Meta's key to our key
-        if k == "tok_embeddings.weight":
-            our_k = "token_embeddings.weight"
-        elif k == "norm.weight":
-            our_k = "post_norm.weight"
-        elif k == "output.weight":
-            our_k = "lm_head.weight"
+        if k == 'tok_embeddings.weight':
+            our_k = 'token_embeddings.weight'
+        elif k == 'norm.weight':
+            our_k = 'post_norm.weight'
+        elif k == 'output.weight':
+            our_k = 'lm_head.weight'
 
         converted[our_k] = state_dict[k].to(dtype)
 
@@ -56,9 +55,9 @@ def convert_state_dict(state_dict: Dict[str, torch.Tensor], dtype: torch.dtype =
 
 
 params_key_mapping = {
-    "dim": "hidden_size",
-    "n_heads": "num_attn_heads",
-    "n_layers": "num_layers",
+    'dim': 'hidden_size',
+    'n_heads': 'num_attn_heads',
+    'n_layers': 'num_layers',
 }
 
 
@@ -77,25 +76,25 @@ def convert_params(meta_params: Dict[str, Any]) -> Dict[str, Any]:
 
 
 shard_dims = {
-    "lm_head.weight": 0,
-    "token_embeddings.weight": 1,
-    "attention.wq.weight": 0,
-    "attention.wk.weight": 0,
-    "attention.wv.weight": 0,
-    "attention.wo.weight": 1,
-    "feed_forward.w1.weight": 0,
-    "feed_forward.w3.weight": 0,
-    "feed_forward.w2.weight": 1,
+    'lm_head.weight': 0,
+    'token_embeddings.weight': 1,
+    'attention.wq.weight': 0,
+    'attention.wk.weight': 0,
+    'attention.wv.weight': 0,
+    'attention.wo.weight': 1,
+    'feed_forward.w1.weight': 0,
+    'feed_forward.w3.weight': 0,
+    'feed_forward.w2.weight': 1,
 }
 
 
 MODEL_TYPE = {
-    "7B": "llama-2-7b",
-    "7B-chat": "llama-2-7b-chat",
-    "13B": "llama-2-13b",
-    "13B-chat": "llama-2-13b-chat",
-    "70B": "llama-2-70b",
-    "70B-chat": "llama-2-70b-chat",
+    '7B': 'llama-2-7b',
+    '7B-chat': 'llama-2-7b-chat',
+    '13B': 'llama-2-13b',
+    '13B-chat': 'llama-2-13b-chat',
+    '70B': 'llama-2-70b',
+    '70B-chat': 'llama-2-70b-chat',
 }
 
 supported_model_types = list(MODEL_TYPE.keys())
@@ -104,19 +103,19 @@ supported_model_types = list(MODEL_TYPE.keys())
 def convert_meta_weights(
     meta_root_ckpt_dir: Path,  # root dir to meta checkpoints, should not include model types in the path
     output_dir: Path,
-    model_type: str = "7B",
-    dtype: str = "bfloat16",
+    model_type: str = '7B',
+    dtype: str = 'bfloat16',
     verify: bool = False,
 ) -> None:
     assert model_type in supported_model_types
 
     dt = getattr(torch, dtype, None)
     if not isinstance(dt, torch.dtype):
-        raise ValueError(f"{dtype} is not a valid dtype.")
+        raise ValueError(f'{dtype} is not a valid dtype.')
 
     device = None
     if verify:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     dtype = dt
 
@@ -125,29 +124,29 @@ def convert_meta_weights(
     output_dir = output_dir / full_model_type
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Starting to convert LLaMA 2 model weights for model type {model_type}, this may take few minutes...")
+    print(f'Starting to convert LLaMA 2 model weights for model type {model_type}, this may take few minutes...')
 
-    checkpoint_files = sorted(model_ckpt_dir.glob("*.pth"))
+    checkpoint_files = sorted(model_ckpt_dir.glob('*.pth'))
     checkpoint_files.sort()
     n_checkpoints = len(checkpoint_files)
 
     if n_checkpoints == 0:
         raise RuntimeError(
-            f"No checkpoints were found at checkpoint root dir {model_ckpt_dir}. `consolidated.0*.pth` files expected at that location."
+            f'No checkpoints were found at checkpoint root dir {model_ckpt_dir}. `consolidated.0*.pth` files expected at that location.'
         )
 
-    print(f"Found {n_checkpoints} checkpoint shards, will merge these into a single checkpoint...")
+    print(f'Found {n_checkpoints} checkpoint shards, will merge these into a single checkpoint...')
 
     # the tokenizer is the same for all model sizes, so we store it in the output parent dir
-    if not (output_dir.parent / "tokenizer.model").exists():
-        print(f"Copying tokenizer model to {output_dir.parent}...")
-        shutil.copy(meta_root_ckpt_dir / "tokenizer.model", output_dir.parent)
+    if not (output_dir.parent / 'tokenizer.model').exists():
+        print(f'Copying tokenizer model to {output_dir.parent}...')
+        shutil.copy(meta_root_ckpt_dir / 'tokenizer.model', output_dir.parent)
 
     # for the bigger models, there are multiple model-parallel checkpoints
     # and we combine them into one single file
     combined = None
     for file in tqdm(checkpoint_files, total=n_checkpoints):
-        checkpoint = torch.load(file, map_location="cpu")
+        checkpoint = torch.load(file, map_location='cpu')
         converted = convert_state_dict(checkpoint, dtype=dtype)
         if combined is None:
             combined = converted
@@ -170,46 +169,46 @@ def convert_meta_weights(
 
     if verify:
         # note with bf16, 7B model will consume 14GB GPU RAM
-        print("Verifying the merged checkpoint state by calling model.load_state_dict on our model...")
+        print('Verifying the merged checkpoint state by calling model.load_state_dict on our model...')
 
-        if device == "cuda":
+        if device == 'cuda':
             torch.set_default_tensor_type(torch.cuda.HalfTensor)
 
         model_args = ModelArgs.from_model_type(model_type)
         model_args.vocab_size = 32000
-        model_args.head_type = "lm_head"
+        model_args.head_type = 'lm_head'
         model = Transformer(model_args)
         model.load_state_dict(combined, strict=True)
         model = model.to(device)
         del model
 
     # save a copy of "params.json" file and also convert to our naming convention
-    with open(Path(model_ckpt_dir) / "params.json", "r") as f:
+    with open(Path(model_ckpt_dir) / 'params.json', 'r') as f:
         meta_params = json.loads(f.read())
 
-    params_save_path = output_dir / "params.json"
-    print(f"Saving params.json to {params_save_path} ...")
+    params_save_path = output_dir / 'params.json'
+    print(f'Saving params.json to {params_save_path} ...')
 
-    with open(params_save_path, "w", encoding="utf-8") as f:
+    with open(params_save_path, 'w', encoding='utf-8') as f:
         json.dump(meta_params, f, indent=2, sort_keys=True)
 
     # save merged checkpoint
-    ckpt_save_path = output_dir / "consolidated.pth"
-    print(f"Saving merged checkpoint to {ckpt_save_path} ...")
+    ckpt_save_path = output_dir / 'consolidated.pth'
+    print(f'Saving merged checkpoint to {ckpt_save_path} ...')
 
     torch.save(combined, ckpt_save_path)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     convert_meta_weights(
-        meta_root_ckpt_dir=Path("/home/michael/llama-2"),
-        output_dir=Path("./checkpoints/llama-2"),
-        model_type="7B",
+        meta_root_ckpt_dir=Path('/home/michael/llama-2'),
+        output_dir=Path('./checkpoints/llama-2'),
+        model_type='7B',
         verify=True,
     )
     convert_meta_weights(
-        meta_root_ckpt_dir=Path("/home/michael/llama-2"),
-        output_dir=Path("./checkpoints/llama-2"),
-        model_type="7B-chat",
+        meta_root_ckpt_dir=Path('/home/michael/llama-2'),
+        output_dir=Path('./checkpoints/llama-2'),
+        model_type='7B-chat',
         verify=True,
     )

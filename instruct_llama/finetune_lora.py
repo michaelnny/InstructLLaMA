@@ -43,7 +43,7 @@ from instruct_llama.utils import (
 
 def setup():
     # initialize the process group
-    dist.init_process_group("nccl")
+    dist.init_process_group('nccl')
 
 
 def cleanup():
@@ -51,7 +51,7 @@ def cleanup():
 
 
 def clear_gpu_cache(rank=None):
-    print(f"clearing cache for rank {rank}")
+    print(f'clearing cache for rank {rank}')
     torch.cuda.empty_cache()
 
 
@@ -140,11 +140,11 @@ def create_optimizer(
         # Check for parameters corresponding to torch.nn.LayerNorm or torch.nn.Embedding.
         # Note we use hard-coded names where 'ln' is for LayerNorm, and 'embed' is for Embedding, this works better with FSDP
         if (
-            p_name.endswith("bias")
-            or p_name.endswith("attention_norm.weight")
-            or p_name.endswith("ffn_norm.weight")
-            or p_name.endswith("post_norm.weight")
-            or p_name.endswith("token_embeddings.weight")
+            p_name.endswith('bias')
+            or p_name.endswith('attention_norm.weight')
+            or p_name.endswith('ffn_norm.weight')
+            or p_name.endswith('post_norm.weight')
+            or p_name.endswith('token_embeddings.weight')
         ):
             no_decay.append(params)
         else:
@@ -155,13 +155,13 @@ def create_optimizer(
     total_num_params = sum(p.numel() for p in params_dict.values())
     assert num_decay_params + num_nodecay_params == total_num_params
 
-    print(f"num decayed parameter tensors: {len(decay)}, with {num_decay_params:,} parameters")
-    print(f"num non-decayed parameter tensors: {len(no_decay)}, with {num_nodecay_params:,} parameters")
+    print(f'num decayed parameter tensors: {len(decay)}, with {num_decay_params:,} parameters')
+    print(f'num non-decayed parameter tensors: {len(no_decay)}, with {num_nodecay_params:,} parameters')
 
     # create the pytorch optimizer object
     optim_groups = [
-        {"params": decay, "weight_decay": weight_decay},
-        {"params": no_decay, "weight_decay": 0.0},
+        {'params': decay, 'weight_decay': weight_decay},
+        {'params': no_decay, 'weight_decay': 0.0},
     ]
 
     if cfg.use_bnb_8bit:
@@ -200,7 +200,7 @@ def run_single_train_step(
 
     """
 
-    local_rank = int(os.environ["LOCAL_RANK"])
+    local_rank = int(os.environ['LOCAL_RANK'])
 
     if return_stats:
         fsdp_metrics = torch.zeros(5).to(local_rank)
@@ -255,12 +255,12 @@ def run_single_train_step(
         train_perplexity = fsdp_metrics[1] / fsdp_metrics[2]
         train_accuracy = 100 * fsdp_metrics[3] / fsdp_metrics[4]
 
-        lr = optimizer.param_groups[0]["lr"]
+        lr = optimizer.param_groups[0]['lr']
         return {
-            "loss": train_loss.item(),
-            "accuracy": train_accuracy.item(),
-            "perplexity": train_perplexity.item(),
-            "learning_rate": lr,
+            'loss': train_loss.item(),
+            'accuracy': train_accuracy.item(),
+            'perplexity': train_perplexity.item(),
+            'learning_rate': lr,
         }
     else:
         return None
@@ -270,11 +270,11 @@ def run_validation_steps(ctx, model, rank, world_size, val_loader):
     """Run M validation iterations"""
     model.eval()  # set model in validation mode
 
-    local_rank = int(os.environ["LOCAL_RANK"])
+    local_rank = int(os.environ['LOCAL_RANK'])
 
     fsdp_metrics = torch.zeros(5).to(local_rank)
 
-    inner_pbar = tqdm.tqdm(range(cfg.val_iters), colour="green", desc="validation iterations")
+    inner_pbar = tqdm.tqdm(range(cfg.val_iters), colour='green', desc='validation iterations')
 
     with torch.no_grad():
         for x, y, loss_mask in itertools.islice(val_loader, cfg.val_iters):
@@ -285,7 +285,7 @@ def run_validation_steps(ctx, model, rank, world_size, val_loader):
             )
 
             # with ctx:
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
                 output = model(x)
 
             loss = compute_finetune_loss(output, y, loss_mask)
@@ -308,7 +308,7 @@ def run_validation_steps(ctx, model, rank, world_size, val_loader):
 
     model.train()  # set model in training mode after validation runs
 
-    return {"loss": val_loss.item(), "accuracy": val_accuracy.item(), 'perplexity': val_perplexity.item()}
+    return {'loss': val_loss.item(), 'accuracy': val_accuracy.item(), 'perplexity': val_perplexity.item()}
 
 
 def custom_collate_fn(batch, pad_id, max_seq_len):
@@ -341,7 +341,7 @@ def custom_collate_fn(batch, pad_id, max_seq_len):
         seq_len = prompt_len + completion_len
         assert seq_len <= max_batch_seq_length
 
-        seq = torch.concat((prompt, completion), dim=0)
+        seq = torch.concat((prompt, completion), dim=0).type(torch.long)
 
         # right padding, a simplified example where 0s are pad id: [1, 2, 3] -> [1, 2, 3, 0, 0]
         batch_sequences[i, :seq_len] = seq
@@ -354,12 +354,6 @@ def custom_collate_fn(batch, pad_id, max_seq_len):
     # shift to right to align with y
     loss_mask = loss_mask[:, 1:]
 
-    # # create attention mask
-    # # BUG in SDPA module when use -inf or bool mask will cause NaNs
-    # attn_mask = torch.full((batch_size, 1, max_batch_seq_length - 1, max_batch_seq_length - 1), float(-1e10))
-
-    # attn_mask = torch.triu(attn_mask, diagonal=1)
-
     return x, y, loss_mask
 
 
@@ -371,9 +365,9 @@ def main():
     if not os.path.exists(cfg.pretrain_ckpt_file):
         raise ValueError(f'Invalid pretrained checkpoint "{cfg.pretrain_ckpt_file}", aborting...')
 
-    local_rank = int(os.environ["LOCAL_RANK"])
-    rank = int(os.environ["RANK"])
-    world_size = int(os.environ["WORLD_SIZE"])
+    local_rank = int(os.environ['LOCAL_RANK'])
+    rank = int(os.environ['RANK'])
+    world_size = int(os.environ['WORLD_SIZE'])
 
     setup()
 
@@ -381,7 +375,7 @@ def main():
 
     # --------------- Load datasets ---------------
 
-    logger.info("Loading datasets ...")
+    logger.info('Loading datasets ...')
 
     tokenizer = Tokenizer(cfg.tokenizer_file)
 
@@ -394,38 +388,38 @@ def main():
     train_dataset = FineTuneDataset(data_sources=cfg.train_datasources, max_seq_len=cfg.max_seq_len)
 
     cuda_kwargs = {
-        "collate_fn": _collate_fn,
-        "num_workers": cfg.dataloader_workers,
-        "batch_size": cfg.micro_batch_size,
-        "pin_memory": True,
-        "shuffle": False,
+        'collate_fn': _collate_fn,
+        'num_workers': cfg.dataloader_workers,
+        'batch_size': cfg.micro_batch_size,
+        'pin_memory': True,
+        'shuffle': False,
     }
 
     train_sampler = DistributedSampler(train_dataset, rank=rank, num_replicas=world_size, shuffle=True)
 
-    train_kwargs = {"batch_size": cfg.micro_batch_size, "sampler": train_sampler}
+    train_kwargs = {'batch_size': cfg.micro_batch_size, 'sampler': train_sampler}
 
     train_kwargs.update(cuda_kwargs)
 
     train_loader = DataLoader(train_dataset, **train_kwargs)
 
-    logger.info(f"Train dataset metadata:\n{train_dataset.get_metadata()}")
+    logger.info(f'Train dataset metadata:\n{train_dataset.get_metadata()}')
 
     # create validation dataset
     val_loader = None
     if cfg.val_interval > 0:
         val_dataset = FineTuneDataset(data_sources=cfg.val_datasources, max_seq_len=cfg.max_seq_len)
 
-        val_kwargs = {"batch_size": cfg.micro_batch_size}
+        val_kwargs = {'batch_size': cfg.micro_batch_size}
         val_kwargs.update(cuda_kwargs)
 
         val_loader = DataLoader(val_dataset, **val_kwargs)
 
-        logger.info(f"Validation dataset metadata:\n{val_dataset.get_metadata()}")
+        logger.info(f'Validation dataset metadata:\n{val_dataset.get_metadata()}')
 
     # --------------- Setup model and optimizer ---------------
 
-    logger.info("Initialize model and optimizer ...")
+    logger.info('Initialize model and optimizer ...')
 
     torch.cuda.set_device(local_rank)
     clear_gpu_cache(local_rank)
@@ -439,14 +433,14 @@ def main():
         model_args.resid_dropout = cfg.resid_dropout
         model_args.head_type = cfg.head_type
 
-        assert model_args.head_type == "lm_head"
+        assert model_args.head_type == 'lm_head'
 
         model = Transformer(model_args)
 
         # Load model checkpoint using strict=False,
         # because there are missing keys due to LoRA weights not contained in checkpoint state
         if os.path.exists(cfg.pretrain_ckpt_file):
-            logger.info(f"Loading pretrained checkpoint {cfg.pretrain_ckpt_file} ...")
+            logger.info(f'Loading pretrained checkpoint {cfg.pretrain_ckpt_file} ...')
             ckpt_state = torch.load(cfg.pretrain_ckpt_file)
             model.load_state_dict(ckpt_state, strict=False)
 
@@ -461,7 +455,7 @@ def main():
         else:
             train_dtype = torch.float16
     else:
-        logger.warning("Training in float32 mode, make sure you have enough GPU RAM")
+        logger.warning('Training in float32 mode, make sure you have enough GPU RAM')
 
     for name, module in model.named_modules():
         if 'norm' in name:  # for better performance, always use full percision for normalization layers
@@ -471,15 +465,16 @@ def main():
 
     model = model.to(local_rank)
 
-    # we found out using torch.autocast will increase GPU RAM usage as we can't run the training on a single RTX 3090
+    # BUG in pytorch 2.0.1, as we found out using torch.autocast will increase GPU RAM usage, and cause CUDA OUT OF MEMORY error
+    # when run the training script on a single RTX 3090
     scaler = None
     mp_ctx = nullcontext()
 
     if cfg.compile_model:
-        logger.info(f"compile model using torch.compile() ...")
+        logger.info('compile model using torch.compile() ...')
         model = torch.compile(model)
 
-    logger.info("Initialize optimizer ...")
+    logger.info('Initialize optimizer ...')
 
     optimizer = create_optimizer(
         model=model,
@@ -500,12 +495,12 @@ def main():
 
     # --------------- Start Training ---------------
 
-    logger.info(f"\nStarting to run {cfg.max_train_iters} training iterations ...")
+    logger.info(f'\nStarting to run {cfg.max_train_iters} training iterations ...')
 
     torch_profiler = None
     # Careful as the logs will grow very fast
     if cfg.use_profiler:
-        torch_profiler = create_trace_profiler(os.path.join(cfg.log_dir, "profile_traces"))
+        torch_profiler = create_trace_profiler(os.path.join(cfg.log_dir, 'profile_traces'))
 
     tb_writer = None
     memmax = None
@@ -525,7 +520,7 @@ def main():
             mem_alloc_tracker = []
             memmax.start()
 
-        inner_pbar = tqdm.tqdm(range(cfg.max_train_iters), colour="blue", desc="Training iterations")
+        inner_pbar = tqdm.tqdm(range(cfg.max_train_iters), colour='blue', desc='Training iterations')
 
     model.train()
     for iter in range(1, cfg.max_train_iters + 1):
@@ -555,10 +550,10 @@ def main():
             )
 
             if tb_writer is not None:
-                tb_writer.add_scalar("train/loss", train_stats["loss"], iter)
-                tb_writer.add_scalar("train/accuracy", train_stats["accuracy"], iter)
-                tb_writer.add_scalar("train/perplexity", train_stats["perplexity"], iter)
-                tb_writer.add_scalar("train/learning_rate", train_stats["learning_rate"], iter)
+                tb_writer.add_scalar('train/loss', train_stats['loss'], iter)
+                tb_writer.add_scalar('train/accuracy', train_stats['accuracy'], iter)
+                tb_writer.add_scalar('train/perplexity', train_stats['perplexity'], iter)
+                tb_writer.add_scalar('train/learning_rate', train_stats['learning_rate'], iter)
 
             if cfg.track_gpu_mem_usage:
                 memmax.update()
@@ -569,7 +564,7 @@ def main():
             # save model state
             checkpoint = lora_state_dict(model, bias=cfg.train_bias, head=cfg.train_head)
 
-            torch.save(checkpoint, os.path.join(cfg.ckpt_dir, f"lora_{cfg.model_type}-iter-{iter}.pth"))
+            torch.save(checkpoint, os.path.join(cfg.ckpt_dir, f'lora_{cfg.model_type}-iter-{iter}.pth'))
 
         # validation steps
         if cfg.val_iters > 0 and (cfg.val_interval > 0 and iter % cfg.val_interval == 0 or iter == cfg.max_train_iters):
@@ -582,28 +577,28 @@ def main():
                 )
 
                 if tb_writer is not None:
-                    tb_writer.add_scalar("val/loss", val_stats["loss"], iter)
-                    tb_writer.add_scalar("val/accuracy", val_stats["accuracy"], iter)
-                    tb_writer.add_scalar("val/perplexity", val_stats["perplexity"], iter)
+                    tb_writer.add_scalar('val/loss', val_stats['loss'], iter)
+                    tb_writer.add_scalar('val/accuracy', val_stats['accuracy'], iter)
+                    tb_writer.add_scalar('val/perplexity', val_stats['perplexity'], iter)
 
     if rank == 0:
         # training is done...show some training stats.
         if cfg.track_gpu_mem_usage:
             memmax.stop()
-            logger.info(f"Total memory allocated: {mem_alloc_tracker}")
-            logger.info(f"CUDA Memory Summary After Last training:\n{torch.cuda.memory_summary()}")
+            logger.info(f'Total memory allocated: {mem_alloc_tracker}')
+            logger.info(f'CUDA Memory Summary After Last training:\n{torch.cuda.memory_summary()}')
 
     # all done, set barrier to ensure all GPU's complete, and then cleanup
     dist.barrier()
     cleanup()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
     random.seed(cfg.seed)
 
-    torch.set_float32_matmul_precision("high")
+    torch.set_float32_matmul_precision('high')
 
     torch.backends.cuda.enable_flash_sdp(False)
     torch.backends.cuda.enable_mem_efficient_sdp(True)

@@ -2,11 +2,11 @@
 
 We rewrite the original code to make it easier to understand, we can also use the code to build fine-tuning samples.
 """
-from typing import Tuple, List, Mapping, Text, Literal, Optional, Tuple, TypedDict
+from typing import Tuple, List, Mapping, Text, Literal, Optional, TypedDict
 
 from instruct_llama.tokenizer import Tokenizer
 
-Role = Literal["system", "user", "assistant"]
+Role = Literal['system', 'user', 'assistant']
 
 
 class Message(TypedDict):
@@ -28,8 +28,8 @@ class ChatPrediction(TypedDict, total=False):
 
 Dialog = List[Message]
 
-B_INST, E_INST = "[INST]", "[/INST]"
-B_SYS, E_SYS = "<<SYS>>\n", "\n<</SYS>>\n\n"
+B_INST, E_INST = '[INST]', '[/INST]'
+B_SYS, E_SYS = '<<SYS>>\n', '\n<</SYS>>\n\n'
 DEFAULT_SYSTEM_PROMPT = """\
 You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe. Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.
 
@@ -40,20 +40,18 @@ def maybe_add_system_prompt(dialog: Dialog) -> Dialog:
     """Insert a dialog with system role at the beginning of the list if there're no such one."""
     assert dialog is not None and len(dialog) > 0
 
-    if dialog[0]["role"] != "system":
+    if dialog[0]['role'] != 'system':
         dialog = [
             {
-                "role": "system",
-                "content": DEFAULT_SYSTEM_PROMPT,
+                'role': 'system',
+                'content': DEFAULT_SYSTEM_PROMPT,
             }
         ] + dialog
 
     return dialog
 
 
-def build_prompt_completion(
-    dialog: Dialog, tokenizer: Tokenizer
-) -> Tuple[List[int], List[int]]:
+def build_prompt_completion(dialog: Dialog, tokenizer: Tokenizer) -> Tuple[List[int], List[int]]:
     """Build prompt and completion pair following the Meta llama-2 format.
 
     Note we only build the training target completion if the last role in the dialog is 'assistant'.
@@ -69,10 +67,12 @@ def build_prompt_completion(
     # make sure the first one is always system prompt
     dialog = maybe_add_system_prompt(dialog)
 
+    assert len(dialog) >= 2
+
     assert (
-        dialog[0]["role"] == "system"
-        and all([msg["role"] == "user" for msg in dialog[1::2]])
-        and all([msg["role"] == "assistant" for msg in dialog[2::2]])
+        dialog[0]['role'] == 'system'
+        and all([msg['role'] == 'user' for msg in dialog[1::2]])
+        and all([msg['role'] == 'assistant' for msg in dialog[2::2]])
     ), (
         "model only supports 'system', 'user' and 'assistant' roles, "
         "starting with 'system', then 'user' and alternating (u/a/u/a/u...)"
@@ -81,20 +81,20 @@ def build_prompt_completion(
     # store user-prompt:answer pairs so we can later add BOS, EOS tokens to each pair
     prompts = []
     for i in range(1, len(dialog), 2):  # skip the first one since it's system prompt
-        full_prompt = ""
+        full_prompt = ''
         prompt = dialog[i]
 
         if i == 1:
             # add system prompt, note Meta llama-2 insert the system prompt inside the first user prompt
             # as in this format: [INST] <<SYS>>\n{system prompt}\n<</SYS>>\n\n{1st user prompt} [/INST]
-            sys_prompt = B_SYS + dialog[0]["content"] + E_SYS
+            sys_prompt = B_SYS + dialog[0]['content'] + E_SYS
             full_prompt = f"{B_INST} {sys_prompt}{(prompt['content']).strip()} {E_INST}"
         else:
             full_prompt = f"{B_INST} {(prompt['content']).strip()} {E_INST}"
 
         # add answer to the full prompt
         # here we skip the last answer by the assistant, since it's used for building the training target
-        if i + 1 < len(dialog) - 1 and dialog[i + 1]["role"] == "assistant":
+        if i + 1 < len(dialog) - 1 and dialog[i + 1]['role'] == 'assistant':
             answer = dialog[i + 1]
             full_prompt += f" {(answer['content']).strip()} "
 
@@ -112,7 +112,7 @@ def build_prompt_completion(
 
     # completion tokens for training
     completion_tokens = None
-    if dialog[-1]["role"] == "assistant":
+    if dialog[-1]['role'] == 'assistant':
         answer = dialog[-1]
         target = f" {(answer['content']).strip()} "
         completion_tokens = tokenizer.encode(target, bos=False, eos=True)
@@ -120,37 +120,37 @@ def build_prompt_completion(
     return prompt_tokens, completion_tokens
 
 
-if __name__ == "__main__":
-    tokenizer = Tokenizer(model_path="/home/michael/llama-2/tokenizer.model")
+if __name__ == '__main__':
+    tokenizer = Tokenizer(model_path='/home/michael/llama-2/tokenizer.model')
 
     example_dialogs = [
         [
-            {"role": "user", "content": "Solve 1+37."},
-            {"role": "assistant", "content": "38"},
+            {'role': 'user', 'content': 'Solve 1+37.'},
+            {'role': 'assistant', 'content': '38'},
         ],
         [
-            {"role": "user", "content": "Tell me a joke about a dog."},
+            {'role': 'user', 'content': 'Tell me a joke about a dog.'},
         ],
         [
             {
-                "role": "system",
-                "content": "You are a very clever and funny agent, make people laugh is your natural job.",
+                'role': 'system',
+                'content': 'You are a very clever and funny agent, make people laugh is your natural job.',
             },
             {
-                "role": "user",
-                "content": "Tell me a joke about a cat playing some toy car.",
+                'role': 'user',
+                'content': 'Tell me a joke about a cat playing some toy car.',
             },
         ],
         [
-            {"role": "user", "content": "I am going to Paris, what should I see?"},
-            {"role": "assistant", "content": "You should go to The Eiffel Tower."},
-            {"role": "user", "content": "What's so special about it?"},
+            {'role': 'user', 'content': 'I am going to Paris, what should I see?'},
+            {'role': 'assistant', 'content': 'You should go to The Eiffel Tower.'},
+            {'role': 'user', 'content': "What's so special about it?"},
         ],
         [
-            {"role": "user", "content": "I am going to Paris, what should I see?"},
-            {"role": "assistant", "content": "You should go to The Eiffel Tower."},
-            {"role": "user", "content": "What's so special about it?"},
-            {"role": "assistant", "content": "Just go there and you'll find out."},
+            {'role': 'user', 'content': 'I am going to Paris, what should I see?'},
+            {'role': 'assistant', 'content': 'You should go to The Eiffel Tower.'},
+            {'role': 'user', 'content': "What's so special about it?"},
+            {'role': 'assistant', 'content': "Just go there and you'll find out."},
         ],
     ]
 
@@ -160,8 +160,8 @@ if __name__ == "__main__":
             tokenizer,
         )
 
-        print(f"Prompt: {tokenizer.decode(prompt_tokens)}")
+        print(f'Prompt: {tokenizer.decode(prompt_tokens)}')
 
         if completion_tokens is not None:
-            print(f"Completion: {tokenizer.decode(completion_tokens)}")
-        print("\n\n")
+            print(f'Completion: {tokenizer.decode(completion_tokens)}')
+        print('\n\n')

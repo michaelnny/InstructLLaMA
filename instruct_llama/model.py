@@ -13,12 +13,12 @@ from torch import nn
 
 # llama 2 models
 llama_configs = {
-    "7B": dict(n_layers=32, n_heads=32, dim=4096),
-    "13B": dict(n_layers=40, n_heads=40, dim=5120),
-    "70B": dict(n_layers=80, n_heads=64, dim=8192),
-    "7B-chat": dict(n_layers=32, n_heads=32, dim=4096),
-    "13B-chat": dict(n_layers=40, n_heads=40, dim=5120),
-    "70B-chat": dict(n_layers=80, n_heads=64, dim=8192),
+    '7B': dict(n_layers=32, n_heads=32, dim=4096),
+    '13B': dict(n_layers=40, n_heads=40, dim=5120),
+    '70B': dict(n_layers=80, n_heads=64, dim=8192),
+    '7B-chat': dict(n_layers=32, n_heads=32, dim=4096),
+    '13B-chat': dict(n_layers=40, n_heads=40, dim=5120),
+    '70B-chat': dict(n_layers=80, n_heads=64, dim=8192),
 }
 
 
@@ -38,7 +38,7 @@ class ModelArgs:
     max_batch_size: int = 4
     max_seq_len: int = 2048
 
-    head_type: str = "lm_head"  # none, lm_head, scalar_head
+    head_type: str = 'lm_head'  # none, lm_head, scalar_head
     use_cache: bool = False  # should only use cache when do inference
 
     # used during training
@@ -163,17 +163,17 @@ class Attention(nn.Module):
         xq = xq.transpose(1, 2)  # (bs, n_heads, seqlen, head_dim)
         keys = keys.transpose(1, 2)
         values = values.transpose(1, 2)
+
         scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
         if mask is not None:
-            scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
+            scores = scores + mask  # (bs, n_heads, seqlen, cache_len + seqlen)
         scores = F.softmax(scores.float(), dim=-1).type_as(xq)
         scores = self.attn_dropout(scores)
 
-        output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
+        output = torch.matmul(scores, values)  # (bs, n_heads, seqlen, head_dim)
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
         output = self.wo(output)
         output = self.resid_dropout(output)
-
         return output
 
 
@@ -243,8 +243,7 @@ class Transformer(nn.Module):
         self.vocab_size = params.vocab_size
         self.n_layers = params.n_layers
 
-        self.token_embeddings = nn.Embedding(params.vocab_size, params.dim, padding_idx=-1)
-
+        self.token_embeddings = nn.Embedding(params.vocab_size, params.dim)
         self.embeddings_dropout = nn.Dropout(params.embed_dropout)
 
         self.layers = torch.nn.ModuleList()
@@ -253,9 +252,9 @@ class Transformer(nn.Module):
 
         self.post_norm = RMSNorm(params.dim, eps=params.norm_eps)
 
-        if self.params.head_type == "lm_head":
+        if self.params.head_type == 'lm_head':
             self.lm_head = nn.Linear(params.dim, params.vocab_size, bias=False)
-        elif self.params.head_type == "scalar_head":
+        elif self.params.head_type == 'scalar_head':
             self.scalar_head = nn.Linear(params.dim, 1, bias=False)
 
         self.freqs_cis = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.max_seq_len * 2)
@@ -270,16 +269,16 @@ class Transformer(nn.Module):
 
         mask = None
         if seqlen > 1:
-            mask = torch.full((1, 1, seqlen, seqlen), float("-inf"), device=tokens.device)
+            mask = torch.full((1, 1, seqlen, seqlen), float('-inf'), device=tokens.device)
             mask = torch.triu(mask, diagonal=start_pos + 1).type_as(h)
 
         for layer in self.layers:
             h = layer(h, start_pos, freqs_cis, mask)
         h = self.post_norm(h)
 
-        if self.params.head_type == "lm_head":
+        if self.params.head_type == 'lm_head':
             output = self.lm_head(h).float()
-        elif self.params.head_type == "scalar_head":
+        elif self.params.head_type == 'scalar_head':
             output = self.scalar_head(h).float()
         else:
             output = h
@@ -287,8 +286,8 @@ class Transformer(nn.Module):
         return output
 
 
-if __name__ == "__main__":
-    for type in ("7B", "13B", "70B"):
+if __name__ == '__main__':
+    for type in ('7B', '13B', '70B'):
         model_args = ModelArgs.from_model_type(type)
 
         print(model_args)

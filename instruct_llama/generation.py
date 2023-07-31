@@ -3,9 +3,8 @@
 
 import json
 import os
-import sys
+
 import time
-from pathlib import Path
 from typing import List, Literal, Optional, Tuple, TypedDict
 
 import torch
@@ -38,20 +37,20 @@ class Llama:
         max_seq_len: int,
         max_batch_size: int,
         device: str,
-    ) -> "Llama":
-        print("Starting to load model and tokenizer checkpoints...")
+    ) -> 'Llama':
+        print('Starting to load model and tokenizer checkpoints...')
         torch.set_default_device(device)
 
         # seed must be the same in all processes
         torch.manual_seed(1)
 
         start_time = time.time()
-        checkpoints = sorted(Path(ckpt_dir).glob("*.pth"))
-        assert len(checkpoints) == 1, f"no checkpoint files found in {ckpt_dir}"
+        checkpoints = sorted(Path(ckpt_dir).glob('*.pth'))
+        assert len(checkpoints) == 1, f'no checkpoint files found in {ckpt_dir}'
 
         ckpt_path = checkpoints[0]
-        checkpoint = torch.load(ckpt_path, map_location="cpu")
-        with open(Path(ckpt_dir) / "params.json", "r") as f:
+        checkpoint = torch.load(ckpt_path, map_location='cpu')
+        with open(Path(ckpt_dir) / 'params.json', 'r') as f:
             params = json.loads(f.read())
 
         model_args: ModelArgs = ModelArgs(
@@ -66,7 +65,12 @@ class Llama:
         torch.set_default_tensor_type(torch.cuda.HalfTensor)
         model = Transformer(model_args)
         model.load_state_dict(checkpoint, strict=False)
-        print(f"Loaded in {time.time() - start_time:.2f} seconds")
+        print(f'Loaded in {time.time() - start_time:.2f} seconds')
+
+        # for params in model.parameters():
+        #     params.requires_grad = False
+
+        # model = model.eval()
 
         return Llama(model, tokenizer)
 
@@ -94,23 +98,22 @@ class Llama:
         total_len = min(params.max_seq_len, max_gen_len + max_prompt_len)
 
         pad_id = self.tokenizer.pad_id
-        tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device="cuda")
+        tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device='cuda')
         for k, t in enumerate(prompt_tokens):
-            tokens[k, : len(t)] = torch.tensor(t, dtype=torch.long, device="cuda")
+            tokens[k, : len(t)] = torch.tensor(t, dtype=torch.long, device='cuda')
         if logprobs:
             token_logprobs = torch.zeros_like(tokens, dtype=torch.float)
 
         prev_pos = 0
-        eos_reached = torch.tensor([False] * bsz, device="cuda")
+        eos_reached = torch.tensor([False] * bsz, device='cuda')
         input_text_mask = tokens != pad_id
         for cur_pos in range(min_prompt_len, total_len):
             logits = self.model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
-            # logits = self.model.forward(tokens[:, 0:cur_pos], 0) # without model cache
             if logprobs:
                 token_logprobs[:, prev_pos + 1 : cur_pos + 1] = -F.cross_entropy(
                     input=logits.transpose(1, 2),
                     target=tokens[:, prev_pos + 1 : cur_pos + 1],
-                    reduction="none",
+                    reduction='none',
                     ignore_index=pad_id,
                 )
             if temperature > 0:
@@ -170,13 +173,13 @@ class Llama:
         if logprobs:
             return [
                 {
-                    "generation": self.tokenizer.decode(t),
-                    "tokens": [self.tokenizer.decode(x) for x in t],
-                    "logprobs": logprobs_i,
+                    'generation': self.tokenizer.decode(t),
+                    'tokens': [self.tokenizer.decode(x) for x in t],
+                    'logprobs': logprobs_i,
                 }
                 for t, logprobs_i in zip(generation_tokens, generation_logprobs)
             ]
-        return [{"generation": self.tokenizer.decode(t)} for t in generation_tokens]
+        return [{'generation': self.tokenizer.decode(t)} for t in generation_tokens]
 
     def chat_completion(
         self,
@@ -204,16 +207,16 @@ class Llama:
         if logprobs:
             return [
                 {
-                    "generation": {
-                        "role": "assistant",
-                        "content": self.tokenizer.decode(t),
+                    'generation': {
+                        'role': 'assistant',
+                        'content': self.tokenizer.decode(t),
                     },
-                    "tokens": [self.tokenizer.decode(x) for x in t],
-                    "logprobs": logprobs_i,
+                    'tokens': [self.tokenizer.decode(x) for x in t],
+                    'logprobs': logprobs_i,
                 }
                 for t, logprobs_i in zip(generation_tokens, generation_logprobs)
             ]
-        return [{"generation": {"role": "assistant", "content": self.tokenizer.decode(t)}} for t in generation_tokens]
+        return [{'generation': {'role': 'assistant', 'content': self.tokenizer.decode(t)}} for t in generation_tokens]
 
 
 def sample_top_p(probs, p):
