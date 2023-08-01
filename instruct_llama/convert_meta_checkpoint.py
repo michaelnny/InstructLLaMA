@@ -61,20 +61,6 @@ params_key_mapping = {
 }
 
 
-def convert_params(meta_params: Dict[str, Any]) -> Dict[str, Any]:
-    params = {}
-
-    for k in meta_params.keys():
-        our_k = k
-
-        if k in params_key_mapping.keys():
-            our_k = params_key_mapping[k]
-
-        params[our_k] = meta_params[k]
-
-    return params
-
-
 shard_dims = {
     'lm_head.weight': 0,
     'token_embeddings.weight': 1,
@@ -182,21 +168,13 @@ def convert_meta_weights(
         model = model.to(device)
         del model
 
-    # save a copy of "params.json" file and also convert to our naming convention
-    with open(Path(model_ckpt_dir) / 'params.json', 'r') as f:
-        meta_params = json.loads(f.read())
-
-    params_save_path = output_dir / 'params.json'
-    print(f'Saving params.json to {params_save_path} ...')
-
-    with open(params_save_path, 'w', encoding='utf-8') as f:
-        json.dump(meta_params, f, indent=2, sort_keys=True)
-
     # save merged checkpoint
     ckpt_save_path = output_dir / 'consolidated.pth'
     print(f'Saving merged checkpoint to {ckpt_save_path} ...')
-
     torch.save(combined, ckpt_save_path)
+
+    print(f'Copying params.json to {output_dir}...')
+    shutil.copy(model_ckpt_dir / 'params.json', output_dir)
 
 
 if __name__ == '__main__':

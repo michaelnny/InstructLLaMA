@@ -35,7 +35,7 @@ class config:
 
     # training and validation loops
     # training samples * epochs / batch size, 70000 training samples, with batch size of 128, 500 iters = one epoch
-    max_train_iters: int = 2000
+    max_train_iters: int = 1000
     # accumulate gradients so for each iteration, the actual batch size is = micro_batch_size x gradient_accum_steps
     micro_batch_size: int = 2
     gradient_accum_steps: int = 64
@@ -49,14 +49,14 @@ class config:
     lora_alpha: int = 32
     lora_dropout: float = 0.1
     train_bias: str = 'none'  # none, lora_only, all
-    train_head: str = 'none'  # none, lm_head, scalar_head
+    train_head: str = 'none'  # none, lm_head, scalar_head, the performance is not great when also train head
 
     # learning rate scheduler
     init_lr: float = 2e-7  # use a much smaller initial learning rate
     max_lr: float = 2e-5  # max learning rate when warm up
     min_lr: float = 2e-6  # min learning rate after decay
     warmup_steps: int = 100
-    max_decay_steps: int = 2000
+    max_decay_steps: int = 1000
 
     # prompt is less important than completion
     prompt_loss_weight: float = 0.01
@@ -72,7 +72,7 @@ class config:
     grad_clip: float = 1.0
 
     # dropout regularization, note using drop out will slows down the training
-    embed_dropout: float = 0.1
+    embed_dropout: float = 0.2
     attn_dropout: float = 0.2
     resid_dropout: float = 0.2
 

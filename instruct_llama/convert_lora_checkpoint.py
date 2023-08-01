@@ -1,6 +1,7 @@
 """Merge LoRA fine-tunned checkpoint and pretrained checkpoint into a single checkpoint file"""
 
 import os
+import shutil
 import torch
 import torch.nn as nn
 
@@ -31,7 +32,7 @@ def lora_model_lookup(checkpoint: dict) -> int:
 
 
 def merge_lora_checkpoint(
-    model_type: str, lora_ckpt_path: str, pretrained_ckpt_path: str, save_path: str, dtype: torch.dtype = torch.bfloat16
+    model_type: str, lora_ckpt_path: str, pretrained_ckpt_dir: str, save_path: str, dtype: torch.dtype = torch.bfloat16
 ) -> None:
     """Merges LoRA weights with pretrained base model.
 
@@ -39,7 +40,7 @@ def merge_lora_checkpoint(
         model_type: The llama-2 model type, supports 'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'.
         lora_ckpt_path: Path to the checkpoint with trained LoRA weights, which are the output of
             `finetune_lora.py`.
-        pretrained_ckpt_path: The pretrained checkpoint used in side the `finetune_lora.py` when start the fine-tuning.
+        pretrained_ckpt_dir: The pretrained checkpoint used in side the `finetune_lora.py` when start the fine-tuning.
         save_path: target path to save the merged stat_dict.
     """
 
@@ -47,16 +48,26 @@ def merge_lora_checkpoint(
 
     if not os.path.exists(lora_ckpt_path):
         raise ValueError(f'LoRA checkpoint file {lora_ckpt_path} does not exist, aborting...')
-    if not os.path.exists(pretrained_ckpt_path):
-        raise ValueError(f'Pretrained checkpoint file {pretrained_ckpt_path} does not exist, aborting...')
+    if not os.path.exists(pretrained_ckpt_dir):
+        raise ValueError(f'Pretrained checkpoint dir {pretrained_ckpt_dir} does not exist, aborting...')
 
     if os.path.exists(save_path):
         print(f'The checkpoint file {save_path} already exists, aborting...')
         return
 
+    output_dir = os.path.dirname(save_path)
+    if not os.path.exists(output_dir):
+        # Create the output directory if necessary
+        os.makedirs(output_dir, mode=0o777, exist_ok=True)
+
     print('Loading model checkpoints ...')
 
-    pretrained_checkpoint = torch.load(pretrained_ckpt_path)
+    # try to find and load pre-trained and lora checkpoints
+    checkpoints = sorted(Path(pretrained_ckpt_dir).glob('*.pth'))
+    assert len(checkpoints) == 1, f'no checkpoint files found in {pretrained_ckpt_dir}'
+    pretrained_ckpt_file = checkpoints[0]
+
+    pretrained_checkpoint = torch.load(pretrained_ckpt_file)
     lora_checkpoint = torch.load(lora_ckpt_path)
 
     # find the rank from LoRA checkpoint
@@ -85,11 +96,14 @@ def merge_lora_checkpoint(
     print(f'Saving marged model weights to {save_path} ...')
     torch.save(state_dict, save_path)
 
+    print(f'Copying params.json to {output_dir}...')
+    shutil.copy(os.path.join(pretrained_ckpt_dir, 'params.json'), output_dir)
+
 
 if __name__ == '__main__':
     merge_lora_checkpoint(
         model_type='7B',
         lora_ckpt_path='./checkpoints/finetune_lora/lora_7B-iter-1000.pth',
-        pretrained_ckpt_path='./checkpoints/llama-2/llama-2-7b/consolidated.pth',
+        pretrained_ckpt_dir='./checkpoints/llama-2/llama-2-7b/',
         save_path='./checkpoints/7b-finetune/iter-1000-merged.pth',
     )
