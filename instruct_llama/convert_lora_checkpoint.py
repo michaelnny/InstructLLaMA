@@ -84,7 +84,7 @@ def merge_lora_checkpoint(
         model.load_state_dict(lora_checkpoint, strict=False)
 
     for name, module in model.named_modules():
-        if 'norm' in name:  # for better performance, always use full percision for normalization layers
+        if 'norm' in name:  # for better performance, always use full precision for normalization layers
             module = module.to(dtype=torch.float32)
         else:
             module = module.to(dtype=dtype)

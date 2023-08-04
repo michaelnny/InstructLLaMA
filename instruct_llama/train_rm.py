@@ -1,10 +1,11 @@
-"""Fine-tuning LLaMA 2 starting with Meta's pretrained model."""
+"""Train reward model (RM) starting from our fine-tuned model."""
 import os
 import itertools
 import functools
 from typing import Tuple
 import tqdm
 import random
+import math
 import numpy as np
 from contextlib import nullcontext
 
@@ -14,8 +15,6 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 import torch.distributed as dist
-
-from torch.utils.data.distributed import DistributedSampler
 
 
 # support running without installing as a package
@@ -28,10 +27,10 @@ sys.path.append(str(wd))
 
 from instruct_llama.model import Transformer, ModelArgs
 from instruct_llama.tokenizer import Tokenizer
-from instruct_llama.utils import FineTuneDataset
+from instruct_llama.utils import ComparisonsDataset
 from instruct_llama.lora import lora, lora_state_dict, mark_only_lora_as_trainable
 
-from instruct_llama.configs.finetune_lora import config as cfg
+from instruct_llama.configs.train_rm import config as cfg
 
 
 from instruct_llama.utils import (
@@ -72,53 +71,50 @@ def create_trace_profiler(tb_trace_dir):
     return torch_profiler
 
 
-def compute_finetune_loss(logits: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    assert len(logits.shape) == 3  # [B, max_seq_len, vocab_size]
-    assert len(targets.shape) == len(mask.shape) == 2  # [B, max_seq_len]
-    assert logits.shape[0] == targets.shape[0] == mask.shape[0]
+def compute_rm_comparison_loss(rewards: torch.Tensor) -> torch.Tensor:
+    assert len(rewards.shape) == 1  # [num_completions]
 
-    B, T, *_ = logits.shape
+    loss = None
+    N = len(rewards)  # number of completions
+    C = math.comb(N, 2)  # number of combinations
 
-    loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), reduction='none')
+    assert N >= 2
+    assert C >= 1
 
-    assert not torch.any(torch.isnan(loss))
+    for i in range(0, N - 1):
+        r_better = rewards[i]
+        for j in range(i + 1, N):
+            r_worser = rewards[j]
 
-    loss = loss.view(B, T)
-
-    assert loss.shape == mask.shape
-
-    # loss mask is defined as: -1s are prompt tokens, 1s are completion tokens, and 0s the padding tokens
-    # note here prompt is less important than completion
-    weights = mask.float().masked_fill(mask == -1, cfg.prompt_loss_weight).masked_fill(mask == 1, cfg.completion_loss_weight)
-    loss *= weights
-
-    loss = torch.mean(loss)
+            if loss is None:
+                loss = (1 / C) * -torch.log(torch.sigmoid(r_better - r_worser))
+            else:
+                loss += (1 / C) * -torch.log(torch.sigmoid(r_better - r_worser))
 
     return loss
 
 
 @torch.no_grad()
-def compute_metrics(logits: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor) -> Tuple[int, int]:
-    assert len(logits.shape) == 3  # [B, max_seq_len, vocab_size]
-    assert len(targets.shape) == 2  # [B, max_seq_len]
-    assert targets.shape == mask.shape  # [B, max_seq_len]
-    assert logits.shape[0] == targets.shape[0]
+def compute_metrics(rewards: torch.Tensor) -> Tuple[int, int]:
+    assert len(rewards.shape) == 1  # [num_completions]
 
-    # loss mask is defined as: -1s are prompt tokens, 1s are completion tokens, and 0s the padding tokens
-    # only include completion when compute accuracy
-    weights = mask.float().masked_fill(mask == -1, 0)
+    N = len(rewards)  # number of completions
+    C = math.comb(N, 2)  # number of combinations
 
-    # get the index of the max log-probability
-    pred = torch.softmax(logits, dim=-1).argmax(dim=-1)
+    assert N >= 2
+    assert C >= 1
 
-    correct = pred.eq(targets.view_as(pred)).float()
+    num_accurate = 0
 
-    # only consider completion when compute metrics
-    correct *= weights
-    num_accurate = correct.sum().item()
-    num_samples = weights.bool().sum().item()
+    for i in range(0, N - 1):
+        r_better = rewards[i]
+        for j in range(i + 1, N):
+            r_worser = rewards[j]
 
-    return (num_accurate, num_samples)
+            if r_better > r_worser:
+                num_accurate += 1
+
+    return num_accurate, C
 
 
 def create_optimizer(
@@ -204,24 +200,32 @@ def run_single_train_step(
     local_rank = int(os.environ['LOCAL_RANK'])
 
     if return_stats:
-        fsdp_metrics = torch.zeros(5).to(local_rank)
+        fsdp_metrics = torch.zeros(4).to(local_rank)
 
     # prepare for next update
     optimizer.zero_grad(set_to_none=True)
 
-    for x, y, loss_mask in itertools.islice(train_loader, cfg.gradient_accum_steps):
-        x, y, loss_mask = (
-            x.to(local_rank, non_blocking=True),
-            y.to(local_rank, non_blocking=True),
-            loss_mask.to(local_rank, non_blocking=True),
-        )
+    for x, ys in itertools.islice(train_loader, cfg.gradient_accum_steps):
+        # forward pass to compute reward for each completion
+        rewards = torch.zeros((len(ys))).to(local_rank)
 
-        with ctx:
-            output = model(x)
+        x = torch.tensor(x, dtype=torch.long).to(local_rank)
+        for i, y in enumerate(ys):
+            y = torch.tensor(y, dtype=torch.long).to(local_rank)
 
-        loss = compute_finetune_loss(output, y, loss_mask)
-        # scale the loss to account for gradient accumulation
-        scaled_loss = loss / cfg.gradient_accum_steps
+            tokens = torch.concat((x, y), dim=0).type(torch.long).to(local_rank)
+            tokens = tokens.unsqueeze(0)
+            with ctx:
+                output = model(tokens)  # [1, seq_len, 1]
+
+                # only use the reward from terminal time step
+                r_T = output.squeeze()[-1]
+                rewards[i] = r_T
+
+        # compute loss
+        loss = compute_rm_comparison_loss(rewards)
+        # scale the loss to account for gradient accumulation, we assume average completions per prompt is 4
+        scaled_loss = loss / (cfg.gradient_accum_steps * 4)
 
         if scaler is not None:  # when using float16
             scaler.scale(scaled_loss).backward()
@@ -229,12 +233,11 @@ def run_single_train_step(
             scaled_loss.backward()
 
         if return_stats:
-            num_acc, num_samples = compute_metrics(output, y, loss_mask)
+            num_acc, num_samples = compute_metrics(rewards)
             fsdp_metrics[0] += loss.item()  # sum up batch loss
-            fsdp_metrics[1] += np.exp(loss.item())  # sum up perplexity
-            fsdp_metrics[2] += 1  # increase number of batches
-            fsdp_metrics[3] += num_acc  # sum up number of accurate prediction tokens
-            fsdp_metrics[4] += num_samples  # sum up number of tokens
+            fsdp_metrics[1] += 1  # increase number of batches
+            fsdp_metrics[2] += num_acc  # sum up number of accurate prediction tokens
+            fsdp_metrics[3] += num_samples  # sum up number of completion
 
     if scaler is not None:  # when using float16
         if cfg.grad_clip != 0.0:
@@ -252,15 +255,13 @@ def run_single_train_step(
     scheduler.step()  # call lr scheduler on a step-by-step basis instead of epoch
 
     if return_stats:
-        train_loss = fsdp_metrics[0] / fsdp_metrics[2]
-        train_perplexity = fsdp_metrics[1] / fsdp_metrics[2]
-        train_accuracy = 100 * fsdp_metrics[3] / fsdp_metrics[4]
+        train_loss = fsdp_metrics[0] / fsdp_metrics[1]
+        train_accuracy = 100 * fsdp_metrics[2] / fsdp_metrics[3]
 
         lr = optimizer.param_groups[0]['lr']
         return {
             'loss': train_loss.item(),
             'accuracy': train_accuracy.item(),
-            'perplexity': train_perplexity.item(),
             'learning_rate': lr,
         }
     else:
@@ -269,97 +270,55 @@ def run_single_train_step(
 
 def run_validation_steps(ctx, model, rank, world_size, val_loader):
     """Run M validation iterations"""
+
     model.eval()  # set model in validation mode
 
     local_rank = int(os.environ['LOCAL_RANK'])
 
-    fsdp_metrics = torch.zeros(5).to(local_rank)
+    fsdp_metrics = torch.zeros(4).to(local_rank)
 
     inner_pbar = tqdm.tqdm(range(cfg.val_iters), colour='green', desc='validation iterations')
 
     with torch.no_grad():
-        for x, y, loss_mask in itertools.islice(val_loader, cfg.val_iters):
-            x, y, loss_mask = (
-                x.to(local_rank, non_blocking=True),
-                y.to(local_rank, non_blocking=True),
-                loss_mask.to(local_rank, non_blocking=True),
-            )
+        for x, ys in itertools.islice(val_loader, cfg.val_iters):
+            # forward pass to compute reward for each completion
+            rewards = torch.zeros((len(ys))).to(local_rank)
 
-            # with ctx:
-            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-                output = model(x)
+            x = torch.tensor(x, dtype=torch.long).to(local_rank)
+            for i, y in enumerate(ys):
+                y = torch.tensor(y, dtype=torch.long).to(local_rank)
 
-            loss = compute_finetune_loss(output, y, loss_mask)
+                tokens = torch.concat((x, y), dim=0).type(torch.long).to(local_rank)
+                tokens = tokens.unsqueeze(0)
+                with ctx:
+                    output = model(tokens)  # [1, seq_len, 1]
 
-            num_acc, num_samples = compute_metrics(output, y, loss_mask)
+                    # only use the reward from terminal time step
+                    r_T = output.squeeze()[-1]
+                    rewards[i] = r_T
+
+            # compute loss
+            loss = compute_rm_comparison_loss(rewards)
+            num_acc, num_samples = compute_metrics(rewards)
             fsdp_metrics[0] += loss.item()  # sum up batch loss
-            fsdp_metrics[1] += np.exp(loss.item())  # sum up perplexity
-            fsdp_metrics[2] += 1  # increase number of batches
-            fsdp_metrics[3] += num_acc  # sum up number of accurate prediction tokens
-            fsdp_metrics[4] += num_samples  # sum up number of tokens
+            fsdp_metrics[1] += 1  # increase number of batches
+            fsdp_metrics[2] += num_acc  # sum up number of accurate prediction tokens
+            fsdp_metrics[3] += num_samples  # sum up number of completion
 
-            if inner_pbar is not None:
-                inner_pbar.update(1)
+    if inner_pbar is not None:
+        inner_pbar.update(1)
 
-    val_loss = fsdp_metrics[0] / fsdp_metrics[2]
-    val_perplexity = fsdp_metrics[1] / fsdp_metrics[2]
-    val_accuracy = 100 * fsdp_metrics[3] / fsdp_metrics[4]
+    val_loss = fsdp_metrics[0] / fsdp_metrics[1]
+    val_accuracy = 100 * fsdp_metrics[2] / fsdp_metrics[3]
 
     inner_pbar.close()
 
     model.train()  # set model in training mode after validation runs
 
-    return {'loss': val_loss.item(), 'accuracy': val_accuracy.item(), 'perplexity': val_perplexity.item()}
-
-
-def custom_collate_fn(batch, pad_id, max_seq_len):
-    """
-    Custom collate function to pad the sequence to maximum length in the batch,
-    which is much faster than pad the sequence to some global max sequence length.
-
-    In addition, it will compute the attention mask and loss mask for the batch.
-    """
-
-    batch_size = len(batch)
-
-    batch_seq_lengths = [len(item[0]) + len(item[1]) for item in batch]
-
-    max_batch_seq_length = max(batch_seq_lengths)
-
-    assert max_batch_seq_length <= max_seq_len
-
-    # concatenate prompt, completion together
-    batch_sequences = torch.full((batch_size, max_batch_seq_length), pad_id, dtype=torch.long)
-
-    # where -1s are prompt tokens, 1s are completion tokens, and 0s are padding tokens
-    loss_mask = torch.full((batch_size, max_batch_seq_length), 0, dtype=torch.long)
-
-    for i, (prompt, completion) in enumerate(batch):
-        # need prompt, completion lengths to compute loss mask
-        prompt_len, completion_len = len(prompt), len(completion)
-
-        # enforce check sequence length, since trunk sequence is not the ideal solution since we might lost some very important context
-        seq_len = prompt_len + completion_len
-        assert seq_len <= max_batch_seq_length
-
-        seq = torch.concat((prompt, completion), dim=0).type(torch.long)
-
-        # right padding, a simplified example where 0s are pad id: [1, 2, 3] -> [1, 2, 3, 0, 0]
-        batch_sequences[i, :seq_len] = seq
-        loss_mask[i, :prompt_len] = -1  # prompt tokens
-        loss_mask[i, prompt_len : prompt_len + completion_len] = 1  # completion tokens
-
-    x = batch_sequences[:, :-1]  # [batch_size, max_batch_seq_length - 1]
-    y = batch_sequences[:, 1:]  # [batch_size, max_batch_seq_length - 1]
-
-    # shift to right to align with y
-    loss_mask = loss_mask[:, 1:]
-
-    return x, y, loss_mask
+    return {'loss': val_loss.item(), 'accuracy': val_accuracy.item()}
 
 
 def main():
-    assert cfg.micro_batch_size >= 1
     assert cfg.gradient_accum_steps >= 1
     assert cfg.log_interval >= 10
 
@@ -380,39 +339,26 @@ def main():
 
     tokenizer = Tokenizer(cfg.tokenizer_file)
 
-    _collate_fn = functools.partial(
-        custom_collate_fn,
-        pad_id=tokenizer.eos_id,
-        max_seq_len=cfg.max_seq_len,
-    )
-
-    train_dataset = FineTuneDataset(data_sources=cfg.train_datasources, max_seq_len=cfg.max_seq_len)
+    train_dataset = ComparisonsDataset(data_sources=cfg.train_datasources, max_seq_len=cfg.max_seq_len)
 
     cuda_kwargs = {
-        'collate_fn': _collate_fn,
-        'num_workers': cfg.dataloader_workers,
-        'batch_size': cfg.micro_batch_size,
+        'num_workers': 1,
+        'batch_size': 1,
         'pin_memory': True,
-        'shuffle': False,
+        'shuffle': True,
+        'sampler': None,
     }
 
-    train_sampler = DistributedSampler(train_dataset, rank=rank, num_replicas=world_size, shuffle=True)
-    train_kwargs = {'sampler': train_sampler}
-    train_kwargs.update(cuda_kwargs)
-
-    train_loader = DataLoader(train_dataset, **train_kwargs)
+    train_loader = DataLoader(train_dataset, **cuda_kwargs)
 
     logger.info(f'Train dataset metadata:\n{train_dataset.get_metadata()}')
 
     # create validation dataset
     val_loader = None
     if cfg.val_interval > 0:
-        val_dataset = FineTuneDataset(data_sources=cfg.val_datasources, max_seq_len=cfg.max_seq_len)
+        val_dataset = ComparisonsDataset(data_sources=cfg.val_datasources, max_seq_len=cfg.max_seq_len)
 
-        val_kwargs = {'sampler': None}
-        val_kwargs.update(cuda_kwargs)
-
-        val_loader = DataLoader(val_dataset, **val_kwargs)
+        val_loader = DataLoader(val_dataset, **cuda_kwargs)
 
         logger.info(f'Validation dataset metadata:\n{val_dataset.get_metadata()}')
 
@@ -423,27 +369,30 @@ def main():
     torch.cuda.set_device(local_rank)
     clear_gpu_cache(local_rank)
 
-    with lora(r=cfg.lora_r, alpha=cfg.lora_alpha, dropout=cfg.lora_dropout, enabled=True):
-        model_args = ModelArgs.from_model_type(cfg.model_type)
-        model_args.vocab_size = tokenizer.vocab_size
-        model_args.max_seq_len = cfg.max_seq_len
-        model_args.embed_dropout = cfg.embed_dropout
-        model_args.attn_dropout = cfg.attn_dropout
-        model_args.resid_dropout = cfg.resid_dropout
-        model_args.head_type = cfg.head_type
+    model_args = ModelArgs.from_model_type(cfg.model_type)
+    model_args.vocab_size = tokenizer.vocab_size
+    model_args.max_seq_len = cfg.max_seq_len
+    model_args.embed_dropout = cfg.embed_dropout
+    model_args.attn_dropout = cfg.attn_dropout
+    model_args.resid_dropout = cfg.resid_dropout
+    model_args.head_type = cfg.head_type
 
-        assert model_args.head_type == 'lm_head'
+    assert model_args.head_type == 'scalar_head'
 
-        model = Transformer(model_args)
+    model = Transformer(model_args)
 
-        # Load model checkpoint using strict=False,
-        # because there are missing keys due to LoRA weights not contained in checkpoint state
-        if os.path.exists(cfg.pretrain_ckpt_file):
-            logger.info(f'Loading pretrained checkpoint {cfg.pretrain_ckpt_file} ...')
-            ckpt_state = torch.load(cfg.pretrain_ckpt_file)
-            model.load_state_dict(ckpt_state, strict=False)
+    # Load model checkpoint using strict=False,
+    if os.path.exists(cfg.pretrain_ckpt_file):
+        logger.info(f'Loading pretrained checkpoint {cfg.pretrain_ckpt_file} ...')
+        ckpt_state = torch.load(cfg.pretrain_ckpt_file)
+        model.load_state_dict(ckpt_state, strict=False)
 
-    mark_only_lora_as_trainable(model, bias=cfg.train_bias, head=cfg.train_head)
+    # freeze all layers except output head layer
+    for n, p in model.named_parameters():
+        if "scalar_head" in n:
+            p.requires_grad = True
+        else:
+            p.requires_grad = False
 
     # try to convert the model to half precision, otherwise we can't even move the 7B model to a single RTX 3090
     bf16_ready = torch.version.cuda and torch.cuda.is_bf16_supported()
@@ -544,14 +493,12 @@ def main():
         # logging
         if train_stats is not None and rank == 0:
             logger.info(
-                f'Training iteration {iter}: train loss: {train_stats["loss"]:.4f}, '
-                f'train accuracy: {train_stats["accuracy"]:.2f}%, train perplexity: {train_stats["perplexity"]:.2f}, learning rate: {train_stats["learning_rate"]:.10f}'
+                f'Training iteration {iter}: train loss: {train_stats["loss"]:.4f}, train accuracy: {train_stats["accuracy"]:.2f}%, learning rate: {train_stats["learning_rate"]:.10f}'
             )
 
             if tb_writer is not None:
                 tb_writer.add_scalar('train/loss', train_stats['loss'], iter)
                 tb_writer.add_scalar('train/accuracy', train_stats['accuracy'], iter)
-                tb_writer.add_scalar('train/perplexity', train_stats['perplexity'], iter)
                 tb_writer.add_scalar('train/learning_rate', train_stats['learning_rate'], iter)
 
             if cfg.track_gpu_mem_usage:
@@ -561,7 +508,7 @@ def main():
         # checkpointing
         if cfg.ckpt_interval > 0 and iter % cfg.ckpt_interval == 0 or iter == cfg.max_train_iters:
             # save model state
-            checkpoint = lora_state_dict(model, bias=cfg.train_bias, head=cfg.train_head)
+            checkpoint = model.state_dict()
 
             torch.save(checkpoint, os.path.join(cfg.ckpt_dir, f'lora_{cfg.model_type}-iter-{iter}.pth'))
 
@@ -571,14 +518,12 @@ def main():
 
             if rank == 0:
                 logger.info(
-                    f'Training iteration {iter}: validation loss: {val_stats["loss"]:.4f}, '
-                    f'validation accuracy: {val_stats["accuracy"]:.2f}%, validation perplexity: {val_stats["perplexity"]:.2f}'
+                    f'Training iteration {iter}: validation loss: {val_stats["loss"]:.4f}, validation accuracy: {val_stats["accuracy"]:.2f}%'
                 )
 
                 if tb_writer is not None:
                     tb_writer.add_scalar('val/loss', val_stats['loss'], iter)
                     tb_writer.add_scalar('val/accuracy', val_stats['accuracy'], iter)
-                    tb_writer.add_scalar('val/perplexity', val_stats['perplexity'], iter)
 
     if rank == 0:
         # training is done...show some training stats.

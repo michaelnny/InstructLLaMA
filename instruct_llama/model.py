@@ -253,8 +253,10 @@ class Transformer(nn.Module):
         self.post_norm = RMSNorm(params.dim, eps=params.norm_eps)
 
         if self.params.head_type == 'lm_head':
+            print("Creating LLaMA-2 model with LM head...")
             self.lm_head = nn.Linear(params.dim, params.vocab_size, bias=False)
         elif self.params.head_type == 'scalar_head':
+            print("Creating LLaMA-2 model with scalar head...")
             self.scalar_head = nn.Linear(params.dim, 1, bias=False)
 
         self.freqs_cis = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.max_seq_len * 2)

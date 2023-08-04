@@ -199,6 +199,7 @@ class FineTuneDataset(Dataset):
         """
 
         assert len(data_sources) > 0
+        assert max_seq_len > 128
 
         self.data_sources = data_sources
         self.max_seq_len = max_seq_len
@@ -240,6 +241,53 @@ class FineTuneDataset(Dataset):
             "num_samples": len(self),
             "num_tokens": self.total_num_tokens,
             "sequence_length_stats": self.seq_length_stats,
+            "data_sources": self.data_sources,
+        }
+
+
+class ComparisonsDataset(Dataset):
+    def __init__(self, data_sources: Iterable[str], max_seq_len: int = 2048) -> None:
+        """
+        Args:
+            data_sources: a list of string path to where to load the dataset.
+            max_seq_len: prompt_tokens + completion_tokens length greater than this will be discarded.
+        """
+        assert len(data_sources) > 0
+        assert max_seq_len > 128
+
+        self.data_sources = data_sources
+        self.max_seq_len = max_seq_len
+
+        self.data = []
+
+        # Load datasets
+        for source in data_sources:
+            samples = pickle.load(open(source, "rb"))
+            for sample in samples:
+                # here completions is a (descending) ordered list of completion tokens, with the best answer at the begining (index 0)
+                x, ys = sample["prompt_tokens"], sample["completions_tokens"]
+
+                # exclude those samples with length greater than max sequence length
+                ys = [y for y in ys if len(x) + len(y) <= self.max_seq_len]
+
+                if len(ys) < 2:  # comparison requires at least 2 samples
+                    continue
+
+                self.data.append((x, ys))
+
+        random.shuffle(self.data)
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        x, ys = self.data[idx]
+
+        return x, ys
+
+    def get_metadata(self):
+        return {
+            "num_samples": len(self),
             "data_sources": self.data_sources,
         }
 

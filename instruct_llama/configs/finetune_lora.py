@@ -7,7 +7,7 @@ from torch.distributed.fsdp.fully_sharded_data_parallel import StateDictType
 
 @dataclass
 class config:
-    """fine-tuning configurations, where we use smaller learning rates, and less training steps"""
+    """Supervised fine-tuning uisng LoRA"""
 
     # model type definition, the details (number of layers, heads etc.) are defined in model.py
     model_type: str = '7B'  # 7B, 13B, 70B
@@ -72,9 +72,9 @@ class config:
     grad_clip: float = 1.0
 
     # dropout regularization, note using drop out will slows down the training
-    embed_dropout: float = 0.2
-    attn_dropout: float = 0.2
-    resid_dropout: float = 0.2
+    embed_dropout: float = 0.0
+    attn_dropout: float = 0.0
+    resid_dropout: float = 0.0
 
     # training speed improvement
     mixed_precision: bool = True  # try bfloat16 first, but will use float16 if GPU not support

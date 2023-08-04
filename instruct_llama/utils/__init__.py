@@ -10,7 +10,7 @@ from instruct_llama.utils.prompt_builder import (
     DEFAULT_SYSTEM_PROMPT,
     build_prompt_completion,
 )
-from instruct_llama.utils.custom_dataset import DataSource, BlendedDataset, FineTuneDataset
+from instruct_llama.utils.custom_dataset import DataSource, BlendedDataset, FineTuneDataset, ComparisonsDataset
 from instruct_llama.utils.file_helper import (
     find_certain_files_under_dir,
     read_jsonl_file,
