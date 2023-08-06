@@ -36,8 +36,6 @@ from instruct_llama.configs.finetune_lora import config as cfg
 
 from instruct_llama.utils import (
     CosineDecayWithWarmupLRScheduler,
-    Memory_Maximizer,
-    format_to_gb,
     create_logger,
 )
 
@@ -70,6 +68,60 @@ def create_trace_profiler(tb_trace_dir):
     )
 
     return torch_profiler
+
+
+def create_optimizer(
+    model: torch.nn.Module, lr: float, eps: float, weight_decay: float, betas: Tuple[float], fused: bool
+) -> torch.optim.Adam:
+    """
+    Returns the PyTorch Adam optimizer for the model,
+    where we skip apply weight decay to layer norm, embedding, and all bias,
+    and apply weight decay to the reset of parameters.
+    """
+
+    # filter out those do not require gradients
+    params_dict = {p_name: params for p_name, params in model.named_parameters() if params.requires_grad}
+
+    # Create empty lists to store parameters for weight decay and no weight decay.
+    decay = []
+    no_decay = []
+
+    for p_name, params in params_dict.items():
+        # Check for parameters corresponding to torch.nn.LayerNorm or torch.nn.Embedding.
+        # Note we use hard-coded names where 'ln' is for LayerNorm, and 'embed' is for Embedding, this works better with FSDP
+        if (
+            p_name.endswith('bias')
+            or p_name.endswith('attention_norm.weight')
+            or p_name.endswith('ffn_norm.weight')
+            or p_name.endswith('post_norm.weight')
+            or p_name.endswith('token_embeddings.weight')
+        ):
+            no_decay.append(params)
+        else:
+            decay.append(params)
+
+    num_decay_params = sum(p.numel() for p in decay)
+    num_nodecay_params = sum(p.numel() for p in no_decay)
+    total_num_params = sum(p.numel() for p in params_dict.values())
+    assert num_decay_params + num_nodecay_params == total_num_params
+
+    print(f'num decayed parameter tensors: {len(decay)}, with {num_decay_params:,} parameters')
+    print(f'num non-decayed parameter tensors: {len(no_decay)}, with {num_nodecay_params:,} parameters')
+
+    # create the pytorch optimizer object
+    optim_groups = [
+        {'params': decay, 'weight_decay': weight_decay},
+        {'params': no_decay, 'weight_decay': 0.0},
+    ]
+
+    if cfg.use_bnb_8bit:
+        import bitsandbytes as bnb
+
+        optimizer = bnb.optim.Adam8bit(optim_groups, lr=lr, eps=eps, betas=betas)
+    else:
+        optimizer = torch.optim.Adam(optim_groups, lr=lr, eps=eps, betas=betas, fused=fused)
+
+    return optimizer
 
 
 def compute_finetune_loss(logits: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -121,62 +173,7 @@ def compute_metrics(logits: torch.Tensor, targets: torch.Tensor, mask: torch.Ten
     return (num_accurate, num_samples)
 
 
-def create_optimizer(
-    model: torch.nn.Module, lr: float, eps: float, weight_decay: float, betas: Tuple[float], fused: bool
-) -> torch.optim.AdamW:
-    """
-    Returns the PyTorch AdamW optimizer for the model,
-    where we skip apply weight decay to layer norm, embedding, and all bias,
-    and apply weight decay to the reset of parameters.
-    """
-
-    # filter out those do not require gradients
-    params_dict = {p_name: params for p_name, params in model.named_parameters() if params.requires_grad}
-
-    # Create empty lists to store parameters for weight decay and no weight decay.
-    decay = []
-    no_decay = []
-
-    for p_name, params in params_dict.items():
-        # Check for parameters corresponding to torch.nn.LayerNorm or torch.nn.Embedding.
-        # Note we use hard-coded names where 'ln' is for LayerNorm, and 'embed' is for Embedding, this works better with FSDP
-        if (
-            p_name.endswith('bias')
-            or p_name.endswith('attention_norm.weight')
-            or p_name.endswith('ffn_norm.weight')
-            or p_name.endswith('post_norm.weight')
-            or p_name.endswith('token_embeddings.weight')
-        ):
-            no_decay.append(params)
-        else:
-            decay.append(params)
-
-    num_decay_params = sum(p.numel() for p in decay)
-    num_nodecay_params = sum(p.numel() for p in no_decay)
-    total_num_params = sum(p.numel() for p in params_dict.values())
-    assert num_decay_params + num_nodecay_params == total_num_params
-
-    print(f'num decayed parameter tensors: {len(decay)}, with {num_decay_params:,} parameters')
-    print(f'num non-decayed parameter tensors: {len(no_decay)}, with {num_nodecay_params:,} parameters')
-
-    # create the pytorch optimizer object
-    optim_groups = [
-        {'params': decay, 'weight_decay': weight_decay},
-        {'params': no_decay, 'weight_decay': 0.0},
-    ]
-
-    if cfg.use_bnb_8bit:
-        import bitsandbytes as bnb
-
-        optimizer = bnb.optim.AdamW8bit(optim_groups, lr=lr, eps=eps, betas=betas)
-    else:
-        optimizer = torch.optim.AdamW(optim_groups, lr=lr, eps=eps, betas=betas, fused=fused)
-
-    return optimizer
-
-
 def run_single_train_step(
-    ctx,
     model,
     rank,
     world_size,
@@ -204,7 +201,7 @@ def run_single_train_step(
     local_rank = int(os.environ['LOCAL_RANK'])
 
     if return_stats:
-        fsdp_metrics = torch.zeros(5).to(local_rank)
+        metrics = torch.zeros(5).to(local_rank)
 
     # prepare for next update
     optimizer.zero_grad(set_to_none=True)
@@ -216,8 +213,7 @@ def run_single_train_step(
             loss_mask.to(local_rank, non_blocking=True),
         )
 
-        with ctx:
-            output = model(x)
+        output = model(x)
 
         loss = compute_finetune_loss(output, y, loss_mask)
         # scale the loss to account for gradient accumulation
@@ -230,11 +226,11 @@ def run_single_train_step(
 
         if return_stats:
             num_acc, num_samples = compute_metrics(output, y, loss_mask)
-            fsdp_metrics[0] += loss.item()  # sum up batch loss
-            fsdp_metrics[1] += np.exp(loss.item())  # sum up perplexity
-            fsdp_metrics[2] += 1  # increase number of batches
-            fsdp_metrics[3] += num_acc  # sum up number of accurate prediction tokens
-            fsdp_metrics[4] += num_samples  # sum up number of tokens
+            metrics[0] += loss.item()  # sum up batch loss
+            metrics[1] += np.exp(loss.item())  # sum up perplexity
+            metrics[2] += 1  # increase number of batches
+            metrics[3] += num_acc  # sum up number of accurate prediction tokens
+            metrics[4] += num_samples  # sum up number of tokens
 
     if scaler is not None:  # when using float16
         if cfg.grad_clip != 0.0:
@@ -252,9 +248,9 @@ def run_single_train_step(
     scheduler.step()  # call lr scheduler on a step-by-step basis instead of epoch
 
     if return_stats:
-        train_loss = fsdp_metrics[0] / fsdp_metrics[2]
-        train_perplexity = fsdp_metrics[1] / fsdp_metrics[2]
-        train_accuracy = 100 * fsdp_metrics[3] / fsdp_metrics[4]
+        train_loss = metrics[0] / metrics[2]
+        train_perplexity = metrics[1] / metrics[2]
+        train_accuracy = 100 * metrics[3] / metrics[4]
 
         lr = optimizer.param_groups[0]['lr']
         return {
@@ -267,13 +263,13 @@ def run_single_train_step(
         return None
 
 
-def run_validation_steps(ctx, model, rank, world_size, val_loader):
+def run_validation_steps(model, rank, world_size, val_loader):
     """Run M validation iterations"""
     model.eval()  # set model in validation mode
 
     local_rank = int(os.environ['LOCAL_RANK'])
 
-    fsdp_metrics = torch.zeros(5).to(local_rank)
+    metrics = torch.zeros(5).to(local_rank)
 
     inner_pbar = tqdm.tqdm(range(cfg.val_iters), colour='green', desc='validation iterations')
 
@@ -285,25 +281,22 @@ def run_validation_steps(ctx, model, rank, world_size, val_loader):
                 loss_mask.to(local_rank, non_blocking=True),
             )
 
-            # with ctx:
-            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-                output = model(x)
+            output = model(x)
 
             loss = compute_finetune_loss(output, y, loss_mask)
-
             num_acc, num_samples = compute_metrics(output, y, loss_mask)
-            fsdp_metrics[0] += loss.item()  # sum up batch loss
-            fsdp_metrics[1] += np.exp(loss.item())  # sum up perplexity
-            fsdp_metrics[2] += 1  # increase number of batches
-            fsdp_metrics[3] += num_acc  # sum up number of accurate prediction tokens
-            fsdp_metrics[4] += num_samples  # sum up number of tokens
+            metrics[0] += loss.item()  # sum up batch loss
+            metrics[1] += np.exp(loss.item())  # sum up perplexity
+            metrics[2] += 1  # increase number of batches
+            metrics[3] += num_acc  # sum up number of accurate prediction tokens
+            metrics[4] += num_samples  # sum up number of tokens
 
             if inner_pbar is not None:
                 inner_pbar.update(1)
 
-    val_loss = fsdp_metrics[0] / fsdp_metrics[2]
-    val_perplexity = fsdp_metrics[1] / fsdp_metrics[2]
-    val_accuracy = 100 * fsdp_metrics[3] / fsdp_metrics[4]
+    val_loss = metrics[0] / metrics[2]
+    val_perplexity = metrics[1] / metrics[2]
+    val_accuracy = 100 * metrics[3] / metrics[4]
 
     inner_pbar.close()
 
@@ -312,36 +305,30 @@ def run_validation_steps(ctx, model, rank, world_size, val_loader):
     return {'loss': val_loss.item(), 'accuracy': val_accuracy.item(), 'perplexity': val_perplexity.item()}
 
 
-def custom_collate_fn(batch, pad_id, max_seq_len):
+def custom_collate_fn(batch, pad_id: int, max_seq_len: int, full_pad: bool = False) -> Tuple[torch.Tensor]:
     """
     Custom collate function to pad the sequence to maximum length in the batch,
-    which is much faster than pad the sequence to some global max sequence length.
-
-    In addition, it will compute the attention mask and loss mask for the batch.
+    and compute the loss mask for the batch.
     """
 
     batch_size = len(batch)
 
-    batch_seq_lengths = [len(item[0]) + len(item[1]) for item in batch]
+    max_batch_seq_len = max([len(item[0]) + len(item[1]) for item in batch])
+    assert max_batch_seq_len <= max_seq_len
 
-    max_batch_seq_length = max(batch_seq_lengths)
-
-    assert max_batch_seq_length <= max_seq_len
+    if full_pad:
+        max_batch_seq_len = max_seq_len
 
     # concatenate prompt, completion together
-    batch_sequences = torch.full((batch_size, max_batch_seq_length), pad_id, dtype=torch.long)
+    batch_sequences = torch.full((batch_size, max_batch_seq_len), pad_id, dtype=torch.long)
 
     # where -1s are prompt tokens, 1s are completion tokens, and 0s are padding tokens
-    loss_mask = torch.full((batch_size, max_batch_seq_length), 0, dtype=torch.long)
+    loss_mask = torch.full((batch_size, max_batch_seq_len), 0, dtype=torch.long)
 
     for i, (prompt, completion) in enumerate(batch):
         # need prompt, completion lengths to compute loss mask
         prompt_len, completion_len = len(prompt), len(completion)
-
-        # enforce check sequence length, since trunk sequence is not the ideal solution since we might lost some very important context
         seq_len = prompt_len + completion_len
-        assert seq_len <= max_batch_seq_length
-
         seq = torch.concat((prompt, completion), dim=0).type(torch.long)
 
         # right padding, a simplified example where 0s are pad id: [1, 2, 3] -> [1, 2, 3, 0, 0]
@@ -349,8 +336,8 @@ def custom_collate_fn(batch, pad_id, max_seq_len):
         loss_mask[i, :prompt_len] = -1  # prompt tokens
         loss_mask[i, prompt_len : prompt_len + completion_len] = 1  # completion tokens
 
-    x = batch_sequences[:, :-1]  # [batch_size, max_batch_seq_length - 1]
-    y = batch_sequences[:, 1:]  # [batch_size, max_batch_seq_length - 1]
+    x = batch_sequences[:, :-1]  # [batch_size, max_batch_seq_len - 1]
+    y = batch_sequences[:, 1:]  # [batch_size, max_batch_seq_len - 1]
 
     # shift to right to align with y
     loss_mask = loss_mask[:, 1:]
@@ -376,7 +363,7 @@ def main():
 
     # --------------- Load datasets ---------------
 
-    logger.info('Loading datasets ...')
+    logger.info('Loading datasets...')
 
     tokenizer = Tokenizer(cfg.tokenizer_file)
 
@@ -384,9 +371,8 @@ def main():
         custom_collate_fn,
         pad_id=tokenizer.eos_id,
         max_seq_len=cfg.max_seq_len,
+        full_pad=cfg.full_pad,
     )
-
-    train_dataset = FineTuneDataset(data_sources=cfg.train_datasources, max_seq_len=cfg.max_seq_len)
 
     cuda_kwargs = {
         'collate_fn': _collate_fn,
@@ -396,29 +382,25 @@ def main():
         'shuffle': False,
     }
 
+    train_dataset = FineTuneDataset(data_sources=cfg.train_datasources, max_seq_len=cfg.max_seq_len)
     train_sampler = DistributedSampler(train_dataset, rank=rank, num_replicas=world_size, shuffle=True)
     train_kwargs = {'sampler': train_sampler}
     train_kwargs.update(cuda_kwargs)
-
     train_loader = DataLoader(train_dataset, **train_kwargs)
-
     logger.info(f'Train dataset metadata:\n{train_dataset.get_metadata()}')
 
     # create validation dataset
     val_loader = None
     if cfg.val_interval > 0:
         val_dataset = FineTuneDataset(data_sources=cfg.val_datasources, max_seq_len=cfg.max_seq_len)
-
         val_kwargs = {'sampler': None}
         val_kwargs.update(cuda_kwargs)
-
         val_loader = DataLoader(val_dataset, **val_kwargs)
-
         logger.info(f'Validation dataset metadata:\n{val_dataset.get_metadata()}')
 
     # --------------- Setup model and optimizer ---------------
 
-    logger.info('Initialize model and optimizer ...')
+    logger.info('Initialize model and optimizer...')
 
     torch.cuda.set_device(local_rank)
     clear_gpu_cache(local_rank)
@@ -429,7 +411,6 @@ def main():
         model_args.max_seq_len = cfg.max_seq_len
         model_args.embed_dropout = cfg.embed_dropout
         model_args.attn_dropout = cfg.attn_dropout
-        model_args.resid_dropout = cfg.resid_dropout
         model_args.head_type = cfg.head_type
 
         assert model_args.head_type == 'lm_head'
@@ -439,22 +420,31 @@ def main():
         # Load model checkpoint using strict=False,
         # because there are missing keys due to LoRA weights not contained in checkpoint state
         if os.path.exists(cfg.pretrain_ckpt_file):
-            logger.info(f'Loading pretrained checkpoint {cfg.pretrain_ckpt_file} ...')
-            ckpt_state = torch.load(cfg.pretrain_ckpt_file)
-            model.load_state_dict(ckpt_state, strict=False)
+            logger.info(f'Loading pretrained checkpoint {cfg.pretrain_ckpt_file}...')
+            model_state = torch.load(cfg.pretrain_ckpt_file)
+            model.load_state_dict(model_state, strict=False)
+
+            del model_state
 
     mark_only_lora_as_trainable(model, bias=cfg.train_bias, head=cfg.train_head)
 
     # try to convert the model to half precision, otherwise we can't even move the 7B model to a single RTX 3090
     bf16_ready = torch.version.cuda and torch.cuda.is_bf16_supported()
     train_dtype = torch.float32
+
+    scaler = None
     if cfg.mixed_precision:
         if bf16_ready:
             train_dtype = torch.bfloat16
         else:
             train_dtype = torch.float16
+            scaler = torch.cuda.amp.GradScaler()
     else:
         logger.warning('Training in float32 mode, make sure you have enough GPU RAM')
+
+    # BUG in pytorch 2.0.1, as we found out using torch.autocast will increase GPU RAM usage, and cause CUDA OUT OF MEMORY error
+    # when run the training script on a single RTX 3090
+    # so here we manually move the model to half precision
 
     for name, module in model.named_modules():
         if 'norm' in name:  # for better performance, always use full precision for normalization layers
@@ -464,24 +454,19 @@ def main():
 
     model = model.to(local_rank)
 
-    # BUG in pytorch 2.0.1, as we found out using torch.autocast will increase GPU RAM usage, and cause CUDA OUT OF MEMORY error
-    # when run the training script on a single RTX 3090
-    scaler = None
-    mp_ctx = nullcontext()
-
     if cfg.compile_model:
-        logger.info('compile model using torch.compile() ...')
+        logger.info('compile model using torch.compile()...')
         model = torch.compile(model)
 
-    logger.info('Initialize optimizer ...')
+    logger.info('Initialize optimizer...')
 
     optimizer = create_optimizer(
         model=model,
         lr=cfg.init_lr,
-        eps=cfg.adamw_eps,
+        eps=cfg.adam_eps,
         weight_decay=cfg.weight_decay,
-        betas=cfg.adamw_betas,
-        fused=cfg.adamw_fused,
+        betas=cfg.adam_betas,
+        fused=cfg.adam_fused,
     )
 
     scheduler = CosineDecayWithWarmupLRScheduler(
@@ -494,7 +479,7 @@ def main():
 
     # --------------- Start Training ---------------
 
-    logger.info(f'\nStarting to run {cfg.max_train_iters} training iterations ...')
+    logger.info(f'\nStarting to run {cfg.max_train_iters} training iterations...')
 
     torch_profiler = None
     # Careful as the logs will grow very fast
@@ -502,10 +487,9 @@ def main():
         torch_profiler = create_trace_profiler(os.path.join(cfg.log_dir, 'profile_traces'))
 
     tb_writer = None
-    memmax = None
-    mem_alloc_tracker = None
     inner_pbar = None
-    train_stats = val_stats = None
+    train_stats = None
+    val_stats = None
 
     if rank == 0:
         os.makedirs(cfg.log_dir, exist_ok=True)
@@ -514,17 +498,11 @@ def main():
         if cfg.use_tensorboard:
             tb_writer = SummaryWriter(os.path.join(cfg.log_dir, cfg.model_type))
 
-        if cfg.track_gpu_mem_usage:
-            memmax = Memory_Maximizer()
-            mem_alloc_tracker = []
-            memmax.start()
-
         inner_pbar = tqdm.tqdm(range(cfg.max_train_iters), colour='blue', desc='Training iterations')
 
     model.train()
     for iter in range(1, cfg.max_train_iters + 1):
         train_stats = run_single_train_step(
-            ctx=mp_ctx,
             model=model,
             rank=rank,
             world_size=world_size,
@@ -554,10 +532,6 @@ def main():
                 tb_writer.add_scalar('train/perplexity', train_stats['perplexity'], iter)
                 tb_writer.add_scalar('train/learning_rate', train_stats['learning_rate'], iter)
 
-            if cfg.track_gpu_mem_usage:
-                memmax.update()
-                mem_alloc_tracker.append(format_to_gb(torch.cuda.memory_allocated()))
-
         # checkpointing
         if cfg.ckpt_interval > 0 and iter % cfg.ckpt_interval == 0 or iter == cfg.max_train_iters:
             # save model state
@@ -567,7 +541,7 @@ def main():
 
         # validation steps
         if cfg.val_iters > 0 and (cfg.val_interval > 0 and iter % cfg.val_interval == 0 or iter == cfg.max_train_iters):
-            val_stats = run_validation_steps(ctx=mp_ctx, model=model, rank=rank, world_size=world_size, val_loader=val_loader)
+            val_stats = run_validation_steps(model=model, rank=rank, world_size=world_size, val_loader=val_loader)
 
             if rank == 0:
                 logger.info(
@@ -582,10 +556,7 @@ def main():
 
     if rank == 0:
         # training is done...show some training stats.
-        if cfg.track_gpu_mem_usage:
-            memmax.stop()
-            logger.info(f'Total memory allocated: {mem_alloc_tracker}')
-            logger.info(f'CUDA Memory Summary After Last training:\n{torch.cuda.memory_summary()}')
+        logger.info(f'CUDA Memory Summary After Last training:\n{torch.cuda.memory_summary()}')
 
     # all done, set barrier to ensure all GPU's complete, and then cleanup
     dist.barrier()

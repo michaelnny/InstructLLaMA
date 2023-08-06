@@ -4,7 +4,7 @@ tqdm  # convert_checkpoint.py
 numpy  # train.py dataset memmap
 
 tensorboard
-
+torch_tb_profiler==0.4.1
 
 bitsandbytes  # quantization.py
 

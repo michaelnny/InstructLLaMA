@@ -1,4 +1,4 @@
-"""Train reward model (RM), starting from our fine-tuned model and freeze all weights except the final output layer."""
+"""Train reward model (RM) using LoRA, starting from our fine-tuned model."""
 import os
 import itertools
 import functools
@@ -14,6 +14,9 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
+# import torch.multiprocessing
+
+# torch.multiprocessing.set_sharing_strategy('file_system')
 
 import torch.distributed as dist
 
@@ -29,12 +32,15 @@ sys.path.append(str(wd))
 from instruct_llama.model import Transformer, ModelArgs
 from instruct_llama.tokenizer import Tokenizer
 from instruct_llama.utils import ComparisonsDataset
+from instruct_llama.lora import lora, lora_state_dict, mark_only_lora_as_trainable
 
-from instruct_llama.configs.train_rm import config as cfg
+from instruct_llama.configs.train_rm_lora import config as cfg
 
 
 from instruct_llama.utils import (
     CosineDecayWithWarmupLRScheduler,
+    Memory_Maximizer,
+    format_to_gb,
     create_logger,
 )
 
@@ -219,6 +225,7 @@ def run_single_train_step(
                 end_idx = i + cfg.micro_batch_size
                 micro_batch_tokens = batch_sequence[i:end_idx]
                 output = model(micro_batch_tokens)
+
                 outputs.append(output)
 
             outputs = torch.concat(outputs, dim=0).to(local_rank).squeeze(-1)
@@ -426,35 +433,29 @@ def main():
     torch.cuda.set_device(local_rank)
     clear_gpu_cache(local_rank)
 
-    model_args = ModelArgs.from_model_type(cfg.model_type)
-    model_args.vocab_size = tokenizer.vocab_size
-    model_args.max_seq_len = cfg.max_seq_len
-    model_args.embed_dropout = cfg.embed_dropout
-    model_args.attn_dropout = cfg.attn_dropout
-    model_args.resid_dropout = cfg.resid_dropout
-    model_args.head_type = cfg.head_type
+    with lora(r=cfg.lora_r, alpha=cfg.lora_alpha, dropout=cfg.lora_dropout, enabled=True):
+        model_args = ModelArgs.from_model_type(cfg.model_type)
+        model_args.vocab_size = tokenizer.vocab_size
+        model_args.max_seq_len = cfg.max_seq_len
+        model_args.embed_dropout = cfg.embed_dropout
+        model_args.attn_dropout = cfg.attn_dropout
+        model_args.resid_dropout = cfg.resid_dropout
+        model_args.head_type = cfg.head_type
 
-    assert model_args.head_type == 'scalar_head'
+        assert model_args.head_type == 'scalar_head'
 
-    model = Transformer(model_args)
+        model = Transformer(model_args)
 
-    # Load model checkpoint using strict=False,
-    # because there's not scalar head weights in the checkpoint state
-    if os.path.exists(cfg.pretrain_ckpt_file):
-        logger.info(f'Loading pretrained checkpoint {cfg.pretrain_ckpt_file}...')
-        model_state = torch.load(cfg.pretrain_ckpt_file)
-        model.load_state_dict(model_state, strict=False)
+        # Load model checkpoint using strict=False,
+        # because there's not scalar head weights in the checkpoint state
+        if os.path.exists(cfg.pretrain_ckpt_file):
+            logger.info(f'Loading pretrained checkpoint {cfg.pretrain_ckpt_file}...')
+            model_state = torch.load(cfg.pretrain_ckpt_file)
+            model.load_state_dict(model_state, strict=False)
 
-        del model_state
+            del model_state
 
-    model.init_head_weights()
-
-    # freeze all layers except the final output layer
-    for n, p in model.named_parameters():
-        if 'scalar_head' in n:
-            p.requires_grad = True
-        else:
-            p.requires_grad = False
+    mark_only_lora_as_trainable(model, bias=cfg.train_bias, head=cfg.train_head)
 
     # try to convert the model to half precision, otherwise we can't even move the 7B model to a single RTX 3090
     bf16_ready = torch.version.cuda and torch.cuda.is_bf16_supported()
@@ -565,8 +566,7 @@ def main():
         # checkpointing
         if cfg.ckpt_interval > 0 and iter % cfg.ckpt_interval == 0 or iter == cfg.max_train_iters:
             # save model state
-            full_state_checkpoint = model.state_dict()
-            checkpoint = {k: v for k, v in full_state_checkpoint.items() if 'scalar_head' in k}
+            checkpoint = lora_state_dict(model, bias=cfg.train_bias, head=cfg.train_head)
 
             torch.save(checkpoint, os.path.join(cfg.ckpt_dir, f'lora_{cfg.model_type}-iter-{iter}.pth'))
 

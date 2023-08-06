@@ -50,7 +50,7 @@ DEFAULT_DIALOG = [DEFAULT_SYSTEM_PROMPT]
 
 # ----------------------------------- helper functions -----------------------------------
 
-SKIP_KEY_WORDS = ["photo", "video", "movie", "youtube", "YouTube"]
+SKIP_KEY_WORDS = ['photo', 'video', 'movie', 'youtube', 'YouTube']
 
 
 Answers = List[Mapping[Text, Any]]
@@ -90,7 +90,7 @@ def _split_and_save_datasets(
 
 
 def _string_found(string1: str, string2: str) -> bool:
-    if re.search(r"\b" + re.escape(string1) + r"\b", string2):
+    if re.search(r'\b' + re.escape(string1) + r'\b', string2):
         return True
     return False
 
@@ -105,7 +105,7 @@ def _deduplicate_answers_by_score(answers: Answers, shuffle: bool = True) -> Ans
         # add some randomness so we are not always using the first occurence of some score
         random.shuffle(answers)
 
-    scores = [a["pm_score"] for a in answers]
+    scores = [a['pm_score'] for a in answers]
 
     if len(answers) == len(set(scores)):
         return answers
@@ -120,9 +120,9 @@ def _deduplicate_answers_by_score(answers: Answers, shuffle: bool = True) -> Ans
 
 
 def _remove_answers_with_zero_score(answers: Answers) -> Answers:
-    out = [a for a in answers if int(a["pm_score"]) != 0]
+    out = [a for a in answers if int(a['pm_score']) != 0]
 
-    assert all([int(a["pm_score"]) != 0 for a in out])
+    assert all([int(a['pm_score']) != 0 for a in out])
 
     return out
 
@@ -133,29 +133,29 @@ def _question_contains_skip_words(question: str) -> bool:
     return False
 
 
-def _filter_answers(answers: Answers, min_responses: int, max_responses: int, remove_zero_score: bool) -> Answers:
-    assert min_responses >= 2 and max_responses > min_responses
+def _filter_answers(answers: Answers, min_completions: int, max_completions: int, remove_zero_score: bool) -> Answers:
+    assert min_completions >= 2 and max_completions > min_completions
 
     if remove_zero_score:
         answers = _remove_answers_with_zero_score(answers)
     answers = _deduplicate_answers_by_score(answers)
 
-    if len(answers) < min_responses:
+    if len(answers) < min_completions:
         return []
 
     answers = _sort_answers_by_score_desc(answers)
 
-    if len(answers) > max_responses:
-        answers = answers[:max_responses]
+    if len(answers) > max_completions:
+        answers = answers[:max_completions]
 
     return answers
 
 
 def _extract_text(input_string: str) -> str:
     """Extract raw text from the given string, since it often contains lots of HTML tags."""
-    soup = bs4.BeautifulSoup(input_string, features="html.parser")
+    soup = bs4.BeautifulSoup(input_string, features='html.parser')
 
-    out = soup.text.replace("\n", " ").replace("  ", " ")  # .replace("\'", "'")
+    out = soup.text.replace('\n', ' ').replace('  ', ' ')  # .replace("\'", "'")
     out = out.strip()
     return out
 
@@ -165,8 +165,8 @@ def _process_single_stackexchange_file(
     tokenizer: Tokenizer,
     max_seq_len: int,
     min_question_words: int,
-    min_responses: int,
-    max_responses: int,
+    min_completions: int,
+    max_completions: int,
     remove_zero_score: bool,
 ) -> List[Tuple[int]]:
     """
@@ -188,8 +188,8 @@ def _process_single_stackexchange_file(
     samples = []
 
     for index, row in df.iterrows():
-        question = row["question"]
-        answers = row["answers"]
+        question = row['question']
+        answers = row['answers']
 
         if _question_contains_skip_words(question):
             continue
@@ -199,9 +199,9 @@ def _process_single_stackexchange_file(
             continue
 
         answers = _filter_answers(
-            answers, min_responses=min_responses, max_responses=max_responses, remove_zero_score=remove_zero_score
+            answers, min_completions=min_completions, max_completions=max_completions, remove_zero_score=remove_zero_score
         )
-        if len(answers) < min_responses:
+        if len(answers) < min_completions:
             continue
 
         # build ptompt tokens once
@@ -216,16 +216,16 @@ def _process_single_stackexchange_file(
         completions_tokens = []
         for a in answers:
             answer_text = _extract_text(a['text'])
-            answer = f" {(answer_text).strip()} "
+            answer = f' {(answer_text).strip()} '
             answer_tokens = tokenizer.encode(answer, bos=False, eos=True)
 
             if len(prompt_tokens) + len(answer_tokens) <= max_seq_len:
                 completions_tokens.append(answer_tokens)
 
-        if len(completions_tokens) < 2:
+        if len(completions_tokens) < min_completions:
             continue
 
-        samples.append({"prompt_tokens": prompt_tokens, "completions_tokens": completions_tokens})
+        samples.append({'prompt_tokens': prompt_tokens, 'completions_tokens': completions_tokens})
 
     return samples
 
@@ -238,8 +238,8 @@ def process_stackexchange_dataset(
     output_dir: str,
     tokenizer: Tokenizer,
     min_question_words: int = 8,
-    min_responses: int = 3,
-    max_responses: int = 9,
+    min_completions: int = 3,
+    max_completions: int = 9,
     remove_zero_score: bool = False,
     num_workers=8,
     validation_ratio: float = 0.08,
@@ -295,8 +295,8 @@ def process_stackexchange_dataset(
         _process_single_stackexchange_file,
         max_seq_len=max_seq_length,
         min_question_words=min_question_words,
-        min_responses=min_responses,
-        max_responses=max_responses,
+        min_completions=min_completions,
+        max_completions=max_completions,
         remove_zero_score=remove_zero_score,
         tokenizer=tokenizer,
     )
@@ -318,6 +318,8 @@ def process_stackexchange_dataset(
         'where "prompt_tokens" contains the tokenized user prompt, and "completions_tokens" contains a list of ordered completion (answer) tokens, '
         'with the best answer at the beginning of the list (index 0), and worset answer at the end of the list.'
     )
+    metadata['min_completions'] = min_completions
+    metadata['max_completions'] = max_completions
 
     logger.info('Saving processed stack exchange preferences dataset...')
     _split_and_save_datasets(
@@ -338,4 +340,5 @@ if __name__ == '__main__':
         output_dir='./datasets/stackexchange_dataset',
         tokenizer=tokenizer,
         num_workers=16,
+        overwrite_output=True,
     )

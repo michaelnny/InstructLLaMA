@@ -5,7 +5,7 @@ import math
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple
 from typing_extensions import Self
-
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -35,16 +35,19 @@ class ModelArgs:
     ffn_dim_multiplier: Optional[float] = None
     norm_eps: float = 1e-5
 
-    max_batch_size: int = 4
+    max_batch_size: int = 8
     max_seq_len: int = 2048
 
-    head_type: str = 'lm_head'  # none, lm_head, scalar_head
+    head_type: str = 'lm_head'  # lm_head, scalar_head, lm_and_scalar_heads
     use_cache: bool = False  # should only use cache when do inference
 
     # used during training
     embed_dropout: float = 0.0
     attn_dropout: float = 0.0
     resid_dropout: float = 0.0
+
+    def __post_init__(self):
+        assert self.head_type in ('lm_head', 'scalar_head', 'lm_and_scalar_heads')
 
     @classmethod
     def from_model_type(cls, model_type: str) -> Self:
@@ -127,8 +130,8 @@ class Attention(nn.Module):
             ).cuda()
 
         # regularization
-        self.attn_dropout = nn.Dropout(args.attn_dropout)
-        self.resid_dropout = nn.Dropout(args.resid_dropout)
+        self.attn_dropout = nn.Dropout(args.attn_dropout) if args.attn_dropout > 0 else nn.Identity()
+        self.resid_dropout = nn.Dropout(args.resid_dropout) if args.resid_dropout > 0 else nn.Identity()
 
     def forward(
         self,
@@ -183,8 +186,8 @@ class FeedForward(nn.Module):
         dim: int,
         hidden_dim: int,
         multiple_of: int,
-        resid_dropout: float,
         ffn_dim_multiplier: Optional[float],
+        resid_dropout: Optional[float] = 0.0,
     ):
         super().__init__()
         hidden_dim = int(2 * hidden_dim / 3)
@@ -197,12 +200,11 @@ class FeedForward(nn.Module):
         self.w2 = nn.Linear(hidden_dim, dim, bias=False)
         self.w3 = nn.Linear(dim, hidden_dim, bias=False)
 
-        self.resid_dropout = nn.Dropout(resid_dropout)
+        self.resid_dropout = nn.Dropout(resid_dropout) if resid_dropout > 0 else nn.Identity()
 
     def forward(self, x):
         output = self.w2(F.silu(self.w1(x)) * self.w3(x))
         output = self.resid_dropout(output)
-
         return output
 
 
@@ -217,8 +219,8 @@ class TransformerBlock(nn.Module):
             dim=args.dim,
             hidden_dim=4 * args.dim,
             multiple_of=args.multiple_of,
-            resid_dropout=args.resid_dropout,
             ffn_dim_multiplier=args.ffn_dim_multiplier,
+            resid_dropout=args.resid_dropout,
         )
         self.layer_id = layer_id
         self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
@@ -244,7 +246,7 @@ class Transformer(nn.Module):
         self.n_layers = params.n_layers
 
         self.token_embeddings = nn.Embedding(params.vocab_size, params.dim)
-        self.embeddings_dropout = nn.Dropout(params.embed_dropout)
+        self.embeddings_dropout = nn.Dropout(params.embed_dropout) if params.embed_dropout > 0 else nn.Identity()
 
         self.layers = torch.nn.ModuleList()
         for layer_id in range(params.n_layers):
@@ -253,13 +255,29 @@ class Transformer(nn.Module):
         self.post_norm = RMSNorm(params.dim, eps=params.norm_eps)
 
         if self.params.head_type == 'lm_head':
-            print("Creating LLaMA-2 model with LM head...")
+            print('Creating LLaMA-2 model with LM head...')
             self.lm_head = nn.Linear(params.dim, params.vocab_size, bias=False)
         elif self.params.head_type == 'scalar_head':
-            print("Creating LLaMA-2 model with scalar head...")
-            self.scalar_head = nn.Linear(params.dim, 1, bias=False)
+            print('Creating LLaMA-2 model with scalar head...')
+            self.scalar_head = nn.Linear(params.dim, 1, bias=True)
 
         self.freqs_cis = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.max_seq_len * 2)
+
+    def init_head_weights(self):
+        head = None
+        if self.params.head_type == 'lm_head':
+            head = self.lm_head
+        elif self.params.head_type == 'scalar_head':
+            head = self.scalar_head
+
+        if head is None:
+            return
+
+        print('Initialize weights for model head...')
+
+        init_std = 1.0 / np.sqrt(self.params.dim + 1)
+        torch.nn.init.normal_(head.weight, std=init_std)
+        torch.nn.init.zeros_(head.bias)
 
     def forward(self, tokens: torch.Tensor, start_pos: int = 0) -> torch.Tensor:
         _bsz, seqlen = tokens.shape

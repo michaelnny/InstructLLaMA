@@ -618,7 +618,6 @@ class Attention(llama.Attention):
 
         self.use_cache = False
         # regularization
-        self.resid_dropout = nn.Dropout(args.resid_dropout)
         self.attn_dropout = nn.Dropout(args.attn_dropout)
 
 

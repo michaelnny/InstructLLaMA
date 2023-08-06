@@ -28,27 +28,27 @@ class DataSource:
     def _sanity_check(self):
         assert len(self.name) > 0
         assert 0 <= self.weights <= 1
-        assert os.path.exists(self.data_file) and self.data_file.endswith(".npy")
-        assert os.path.exists(self.metadata_file) and self.metadata_file.endswith(".pkl")
+        assert os.path.exists(self.data_file) and self.data_file.endswith('.npy')
+        assert os.path.exists(self.metadata_file) and self.metadata_file.endswith('.pkl')
 
     def update_weights(self, v) -> None:
         assert 0 <= v <= 1
         self.weights = v
 
     def load_metadata(self) -> None:
-        metadata = pickle.load(open(self.metadata_file, "rb"))
-        assert "num_tokens" in metadata and "data_type" in metadata
-        assert metadata["data_type"] in ["uint16", "unit32"]
+        metadata = pickle.load(open(self.metadata_file, 'rb'))
+        assert 'num_tokens' in metadata and 'data_type' in metadata
+        assert metadata['data_type'] in ['uint16', 'unit32']
 
         self.metadata = metadata
-        self.num_tokens = max(0, int(metadata["num_tokens"]))
-        self.data_type = np.uint16 if metadata["data_type"] == "uint16" else np.uint32
+        self.num_tokens = max(0, int(metadata['num_tokens']))
+        self.data_type = np.uint16 if metadata['data_type'] == 'uint16' else np.uint32
 
         self.weights = self.weights if self.num_tokens > 0 else 0.0
 
     def load_data(self, fully_load: bool = False) -> None:
         if self.weights > 0 and self.num_tokens > 0:
-            arr_memmap = np.memmap(self.data_file, dtype=self.data_type, mode="r", shape=(self.num_tokens,))
+            arr_memmap = np.memmap(self.data_file, dtype=self.data_type, mode='r', shape=(self.num_tokens,))
 
             # load the entire dataset into memory
             if fully_load:
@@ -59,14 +59,14 @@ class DataSource:
 
     def extract_metadata(self):
         return {
-            "name": self.name,
-            "weights": self.weights,
-            "num_tokens": self.num_tokens,
-            "vocab_size": self.metadata["vocab_size"],
-            "tokenizer": self.metadata["tokenizer"],
-            "data_type": self.metadata["data_type"],
-            "data_file": self.data_file,
-            "metadata_file": self.metadata_file,
+            'name': self.name,
+            'weights': self.weights,
+            'num_tokens': self.num_tokens,
+            'vocab_size': self.metadata['vocab_size'],
+            'tokenizer': self.metadata['tokenizer'],
+            'data_type': self.metadata['data_type'],
+            'data_file': self.data_file,
+            'metadata_file': self.metadata_file,
         }
 
 
@@ -183,10 +183,10 @@ class BlendedDataset(IterableDataset):
 
     def get_metadata(self):
         return {
-            "dataset_type": "blended",
-            "num_tokens": self.total_num_tokens,
-            "fully_loaded": self.fully_load,
-            "data_sources": [source.extract_metadata() for source in self.data_sources],
+            'dataset_type': 'blended',
+            'num_tokens': self.total_num_tokens,
+            'fully_loaded': self.fully_load,
+            'data_sources': [source.extract_metadata() for source in self.data_sources],
         }
 
 
@@ -206,24 +206,24 @@ class FineTuneDataset(Dataset):
 
         self.data = []
 
-        seq_lengths = []  # track statistics
+        seq_length_stats = []  # track statistics
 
         # Load datasets
         for source in data_sources:
-            samples = pickle.load(open(source, "rb"))
+            samples = pickle.load(open(source, 'rb'))
             for sample in samples:
-                x, y = sample["prompt_tokens"], sample["completion_tokens"]
+                x, y = sample['prompt_tokens'], sample['completion_tokens']
                 seq_length = len(x) + len(y)
                 if seq_length <= self.max_seq_len:
                     self.data.append((x, y))
-                    seq_lengths.append(seq_length)
+                    seq_length_stats.append(seq_length)
 
-        self.total_num_tokens = sum(seq_lengths)
+        self.total_num_tokens = sum(seq_length_stats)
         self.seq_length_stats = {
-            "min": int(np.min(seq_lengths)),
-            "max": int(np.max(seq_lengths)),
-            "mean": int(np.mean(seq_lengths)),
-            "std": int(np.std(seq_lengths)),
+            'min': int(np.min(seq_length_stats)),
+            'max': int(np.max(seq_length_stats)),
+            'mean': int(np.mean(seq_length_stats)),
+            'std': int(np.std(seq_length_stats)),
         }
 
         random.shuffle(self.data)
@@ -238,15 +238,17 @@ class FineTuneDataset(Dataset):
 
     def get_metadata(self):
         return {
-            "num_samples": len(self),
-            "num_tokens": self.total_num_tokens,
-            "sequence_length_stats": self.seq_length_stats,
-            "data_sources": self.data_sources,
+            'num_samples': len(self),
+            'num_tokens': self.total_num_tokens,
+            'sequence_length_stats': self.seq_length_stats,
+            'data_sources': self.data_sources,
         }
 
 
 class ComparisonsDataset(Dataset):
-    def __init__(self, data_sources: Iterable[str], max_seq_len: int = 2048) -> None:
+    def __init__(
+        self, data_sources: Iterable[str], min_completions: int = 2, max_completions: int = 9, max_seq_len: int = 2048
+    ) -> None:
         """
         Args:
             data_sources: a list of string path to where to load the dataset.
@@ -255,25 +257,53 @@ class ComparisonsDataset(Dataset):
         assert len(data_sources) > 0
         assert max_seq_len > 128
 
+        assert min_completions >= 2 and max_completions > min_completions
+
         self.data_sources = data_sources
         self.max_seq_len = max_seq_len
 
         self.data = []
+        # track some statistics
+        completion_stats = []
+        seq_length_stats = []
 
         # Load datasets
         for source in data_sources:
-            samples = pickle.load(open(source, "rb"))
+            samples = pickle.load(open(source, 'rb'))
             for sample in samples:
                 # here completions is a (descending) ordered list of completion tokens, with the best answer at the begining (index 0)
-                x, ys = sample["prompt_tokens"], sample["completions_tokens"]
+                x, ys = sample['prompt_tokens'], sample['completions_tokens']
+
+                if len(x) > self.max_seq_len:
+                    continue
 
                 # exclude those samples with length greater than max sequence length
                 ys = [y for y in ys if len(x) + len(y) <= self.max_seq_len]
 
-                if len(ys) < 2:  # comparison requires at least 2 samples
+                if len(ys) < min_completions:  # comparison requires at least 2 samples
                     continue
 
+                if len(ys) > max_completions:
+                    ys = ys[:max_completions]
+
+                completion_stats.append(len(ys))
+
+                seq_length_stats.extend([len(x) + len(y) for y in ys])
+
                 self.data.append((x, ys))
+
+        self.completion_stats = {
+            'min': int(np.min(completion_stats)),
+            'max': int(np.max(completion_stats)),
+            'mean': int(np.mean(completion_stats)),
+            'std': int(np.std(completion_stats)),
+        }
+        self.seq_length_stats = {
+            'min': int(np.min(seq_length_stats)),
+            'max': int(np.max(seq_length_stats)),
+            'mean': int(np.mean(seq_length_stats)),
+            'std': int(np.std(seq_length_stats)),
+        }
 
         random.shuffle(self.data)
 
@@ -287,12 +317,14 @@ class ComparisonsDataset(Dataset):
 
     def get_metadata(self):
         return {
-            "num_samples": len(self),
-            "data_sources": self.data_sources,
+            'num_samples': len(self),
+            'completion_stats': self.completion_stats,
+            'sequence_length_stats': self.seq_length_stats,
+            'data_sources': self.data_sources,
         }
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     # pretrain_ds = BlendedDataset(
     #     data_sources=[
     #         DataSource(
@@ -337,8 +369,8 @@ if __name__ == "__main__":
 
     finetune_ds = FineTuneDataset(
         data_sources=[
-            "./datasets/alpaca/train.pkl",
-            "./datasets/dolly/train.pkl",
+            './datasets/alpaca/train.pkl',
+            './datasets/dolly/train.pkl',
         ],
     )
 
@@ -351,5 +383,5 @@ if __name__ == "__main__":
 
     # Iterate over the DataLoader with limited iterations
     for x, y in itertools.islice(dl, pause_after_iterations):
-        print(f"x: {x.shape}")
-        print(f"y: {y.shape}")
+        print(f'x: {x.shape}')
+        print(f'y: {y.shape}')

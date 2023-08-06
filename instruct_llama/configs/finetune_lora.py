@@ -31,16 +31,21 @@ class config:
     )
     dataloader_workers: int = 1
 
-    max_seq_len: int = 450  # use smaller sequence length to save GPU RAM
+    max_seq_len: int = 512  # use smaller sequence length to save GPU RAM
+
+    # if true, always pad the sequence to max_seq_len instead of current maximum length in the batch
+    # this is helpful when starting out and try to found the hyperparameter (e.g batch size, maximum sequence length)
+    # so we will soon found out if CUDA out of memory error occurs, rather than hours into the training process
+    full_pad: bool = False
 
     # training and validation loops
     # training samples * epochs / batch size, 70000 training samples, with batch size of 128, 500 iters = one epoch
-    max_train_iters: int = 1000
+    max_train_iters: int = 2000
     # accumulate gradients so for each iteration, the actual batch size is = micro_batch_size x gradient_accum_steps
     micro_batch_size: int = 2
     gradient_accum_steps: int = 64
     val_interval: int = 500
-    val_iters: int = 500  # large size since micro_batch_size is very small
+    val_iters: int = 400  # large size since micro_batch_size is very small
     log_interval: int = 100  # log training metrics (loss, accuracy)
     ckpt_interval: int = 500  # save model checkpoints every N training iterations
 
@@ -49,36 +54,35 @@ class config:
     lora_alpha: int = 32
     lora_dropout: float = 0.1
     train_bias: str = 'none'  # none, lora_only, all
-    train_head: str = 'none'  # none, lm_head, scalar_head, the performance is not great when also train head
+    train_head: str = 'lm_head'  # none, lm_head, the performance is not great when also train head
 
     # learning rate scheduler
-    init_lr: float = 2e-7  # use a much smaller initial learning rate
-    max_lr: float = 2e-5  # max learning rate when warm up
-    min_lr: float = 2e-6  # min learning rate after decay
+    init_lr: float = 1e-6  # use a much smaller initial learning rate
+    max_lr: float = 4e-5  # max learning rate when warm up
+    min_lr: float = 2e-5  # min learning rate after decay
     warmup_steps: int = 100
-    max_decay_steps: int = 1000
+    max_decay_steps: int = 2000
 
     # prompt is less important than completion
     prompt_loss_weight: float = 0.01
     completion_loss_weight: float = 1.0
 
-    # AdamW optimizer
-    use_bnb_8bit: bool = True  # use bitsandbytes 8bit optimizer
+    # Adam optimizer
+    use_bnb_8bit: bool = False  # use bitsandbytes 8bit optimizer
     weight_decay: float = 0.0
-    adamw_betas: Tuple = (0.9, 0.95)
-    adamw_eps: float = 1e-8
-    adamw_fused: bool = True  # only applicable if not using bitsandbytes 8bit optimizer
+    adam_betas: Tuple = (0.9, 0.95)
+    adam_eps: float = 1e-8
+    adam_fused: bool = True  # only applicable if not using bitsandbytes 8bit optimizer
 
     grad_clip: float = 1.0
 
-    # dropout regularization, note using drop out will slows down the training
+    # dropout regularization
     embed_dropout: float = 0.0
     attn_dropout: float = 0.0
     resid_dropout: float = 0.0
 
-    # training speed improvement
-    mixed_precision: bool = True  # try bfloat16 first, but will use float16 if GPU not support
-    compile_model: bool = False
+    mixed_precision: bool = True  # default to BF16, but if no native GPU support detected, will use FP16.
+    compile_model: bool = False  # BUG in torch 2.0.1
 
     # others
     seed: int = 127
@@ -86,4 +90,3 @@ class config:
     ckpt_dir: str = './checkpoints/finetune_lora'
     use_tensorboard: bool = True
     use_profiler: bool = False  # use torch profiler to monitoring traces
-    track_gpu_mem_usage: bool = False  # track GPU memory allocation statistics
