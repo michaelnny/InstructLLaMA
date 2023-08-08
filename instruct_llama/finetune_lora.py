@@ -72,9 +72,9 @@ def create_trace_profiler(tb_trace_dir):
 
 def create_optimizer(
     model: torch.nn.Module, lr: float, eps: float, weight_decay: float, betas: Tuple[float], fused: bool
-) -> torch.optim.Adam:
+) -> torch.optim.AdamW:
     """
-    Returns the PyTorch Adam optimizer for the model,
+    Returns the PyTorch AdamW optimizer for the model,
     where we skip apply weight decay to layer norm, embedding, and all bias,
     and apply weight decay to the reset of parameters.
     """
@@ -117,9 +117,9 @@ def create_optimizer(
     if cfg.use_bnb_8bit:
         import bitsandbytes as bnb
 
-        optimizer = bnb.optim.Adam8bit(optim_groups, lr=lr, eps=eps, betas=betas)
+        optimizer = bnb.optim.AdamW8bit(optim_groups, lr=lr, eps=eps, betas=betas)
     else:
-        optimizer = torch.optim.Adam(optim_groups, lr=lr, eps=eps, betas=betas, fused=fused)
+        optimizer = torch.optim.AdamW(optim_groups, lr=lr, eps=eps, betas=betas, fused=fused)
 
     return optimizer
 
@@ -228,7 +228,7 @@ def run_single_train_step(
             num_acc, num_samples = compute_metrics(output, y, loss_mask)
             metrics[0] += loss.item()  # sum up batch loss
             metrics[1] += np.exp(loss.item())  # sum up perplexity
-            metrics[2] += 1  # increase number of batches
+            metrics[2] += 1  # increase number of micro batches
             metrics[3] += num_acc  # sum up number of accurate prediction tokens
             metrics[4] += num_samples  # sum up number of tokens
 
@@ -287,7 +287,7 @@ def run_validation_steps(model, rank, world_size, val_loader):
             num_acc, num_samples = compute_metrics(output, y, loss_mask)
             metrics[0] += loss.item()  # sum up batch loss
             metrics[1] += np.exp(loss.item())  # sum up perplexity
-            metrics[2] += 1  # increase number of batches
+            metrics[2] += 1  # increase number of micro batches
             metrics[3] += num_acc  # sum up number of accurate prediction tokens
             metrics[4] += num_samples  # sum up number of tokens
 
@@ -322,7 +322,7 @@ def custom_collate_fn(batch, pad_id: int, max_seq_len: int, full_pad: bool = Fal
     # concatenate prompt, completion together
     batch_sequences = torch.full((batch_size, max_batch_seq_len), pad_id, dtype=torch.long)
 
-    # where -1s are prompt tokens, 1s are completion tokens, and 0s are padding tokens
+    # loss mask where -1s are prompt tokens, 1s are completion tokens, and 0s are padding tokens
     loss_mask = torch.full((batch_size, max_batch_seq_len), 0, dtype=torch.long)
 
     for i, (prompt, completion) in enumerate(batch):
@@ -429,12 +429,10 @@ def main():
     mark_only_lora_as_trainable(model, bias=cfg.train_bias, head=cfg.train_head)
 
     # try to convert the model to half precision, otherwise we can't even move the 7B model to a single RTX 3090
-    bf16_ready = torch.version.cuda and torch.cuda.is_bf16_supported()
     train_dtype = torch.float32
-
     scaler = None
     if cfg.mixed_precision:
-        if bf16_ready:
+        if torch.version.cuda and torch.cuda.is_bf16_supported():
             train_dtype = torch.bfloat16
         else:
             train_dtype = torch.float16
@@ -444,7 +442,9 @@ def main():
 
     # BUG in pytorch 2.0.1, as we found out using torch.autocast will increase GPU RAM usage, and cause CUDA OUT OF MEMORY error
     # when run the training script on a single RTX 3090
-    # so here we manually move the model to half precision
+    # so here we manually set the model to half precision
+
+    # mp_ctx = torch.cuda.amp.autocast(dtype=train_dtype, cache_enabled=False)
 
     for name, module in model.named_modules():
         if 'norm' in name:  # for better performance, always use full precision for normalization layers
@@ -536,7 +536,6 @@ def main():
         if cfg.ckpt_interval > 0 and iter % cfg.ckpt_interval == 0 or iter == cfg.max_train_iters:
             # save model state
             checkpoint = lora_state_dict(model, bias=cfg.train_bias, head=cfg.train_head)
-
             torch.save(checkpoint, os.path.join(cfg.ckpt_dir, f'lora_{cfg.model_type}-iter-{iter}.pth'))
 
         # validation steps

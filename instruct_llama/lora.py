@@ -1,4 +1,4 @@
-# Derived from https://github.com/microsoft/LoRA
+#  Derived from https://github.com/microsoft/LoRA
 #  ------------------------------------------------------------------------------------------
 #  Copyright (c) Microsoft Corporation. All rights reserved.
 #  Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
@@ -566,11 +566,8 @@ class Attention(llama.Attention):
     lora_args = None
 
     def __init__(self, args: llama.ModelArgs) -> None:
-        """Causal self-attention with calculating qkv matrices with a single matrix* and Low Ranking Adaptation for
-        parameter-efficient fine-tuning.
-
-        *Instead of creating multiple heads and concatenating the result (in addition to creating separate matrices for
-        query, key and value for each head) we can do this in a single pass with a single weight matrix.
+        """Attention with training q, v weights using Low Ranking Adaptation for
+        parameter-efficient fine-tuning, and keep k, o fixed.
 
         Args:
             args:
@@ -597,9 +594,6 @@ class Attention(llama.Attention):
         self.wk = nn.Linear(
             args.dim,
             self.n_heads * self.head_dim,
-            # r=self.lora_args.r,
-            # lora_alpha=self.lora_args.alpha,
-            # lora_dropout=self.lora_args.dropout,
             bias=False,
         )
         self.wv = Linear(
@@ -618,14 +612,15 @@ class Attention(llama.Attention):
 
         self.use_cache = False
         # regularization
-        self.attn_dropout = nn.Dropout(args.attn_dropout)
+        self.attn_dropout = nn.Dropout(args.attn_dropout) if args.attn_dropout > 0 else nn.Identity()
+        self.resid_dropout = nn.Dropout(args.resid_dropout) if args.resid_dropout > 0 else nn.Identity()
 
 
 @contextmanager
 def lora(r, alpha, dropout, enabled: bool = True):
     """Apply context manager under which you can instantiate the model with LoRA.
 
-    In a nutshell the code inside this function forces to use LoRA variant of causal self-attention
+    In a nutshell the code inside this function forces to use LoRA variant of attention
     instead of the original one (without LoRA).
 
     Args:

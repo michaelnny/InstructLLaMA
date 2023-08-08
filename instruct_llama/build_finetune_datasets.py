@@ -39,7 +39,7 @@ Metadata = Mapping[Text, Text]
 
 DEFAULT_SYSTEM_PROMPT = {
     'role': 'system',
-    'content': "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe. Please ensure that your responses are socially unbiased and correct. If you don't know the answer to a question, please don't share false information.",
+    'content': '',
 }
 
 # this will be inserted into the training data as the first system prompt
@@ -768,18 +768,6 @@ if __name__ == '__main__':
         tokenizer=tokenizer,
     )
 
-    process_deepmind_math_dataset(
-        src_dirs=['./raw_data/deepmind_mathematics/train-easy'],
-        output_dir='./datasets/deepmind_mathematics',
-        tokenizer=tokenizer,
-        filter_by_names=[
-            'arithmetic__add_or_sub.txt',
-            'arithmetic__add_sub_multiple.txt',
-            'arithmetic__div.txt',
-            'arithmetic__mul.txt',
-        ],
-    )
-
     process_squad_dataset(
         src_dir='./raw_data/squad',
         output_dir='./datasets/squad',
@@ -792,8 +780,20 @@ if __name__ == '__main__':
         tokenizer=tokenizer,
     )
 
-    process_msc_dialog_dataset(
-        src_dir='./raw_data/msc_dialogue',
-        output_dir='./datasets/msc_dialogue',
-        tokenizer=tokenizer,
-    )
+    # process_msc_dialog_dataset(
+    #     src_dir='./raw_data/msc_dialogue',
+    #     output_dir='./datasets/msc_dialogue',
+    #     tokenizer=tokenizer,
+    # )
+
+    # process_deepmind_math_dataset(
+    #     src_dirs=['./raw_data/deepmind_mathematics/train-easy'],
+    #     output_dir='./datasets/deepmind_mathematics',
+    #     tokenizer=tokenizer,
+    #     filter_by_names=[
+    #         'arithmetic__add_or_sub.txt',
+    #         'arithmetic__add_sub_multiple.txt',
+    #         'arithmetic__div.txt',
+    #         'arithmetic__mul.txt',
+    #     ],
+    # )

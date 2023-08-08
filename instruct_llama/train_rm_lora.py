@@ -77,9 +77,9 @@ def create_trace_profiler(tb_trace_dir):
 
 def create_optimizer(
     model: torch.nn.Module, lr: float, eps: float, weight_decay: float, betas: Tuple[float], fused: bool
-) -> torch.optim.Adam:
+) -> torch.optim.AdamW:
     """
-    Returns the PyTorch Adam optimizer for the model,
+    Returns the PyTorch AdamW optimizer for the model,
     where we skip apply weight decay to layer norm, embedding, and all bias,
     and apply weight decay to the reset of parameters.
     """
@@ -122,14 +122,17 @@ def create_optimizer(
     if cfg.use_bnb_8bit:
         import bitsandbytes as bnb
 
-        optimizer = bnb.optim.Adam8bit(optim_groups, lr=lr, eps=eps, betas=betas)
+        optimizer = bnb.optim.AdamW8bit(optim_groups, lr=lr, eps=eps, betas=betas)
     else:
-        optimizer = torch.optim.Adam(optim_groups, lr=lr, eps=eps, betas=betas, fused=fused)
+        optimizer = torch.optim.AdamW(optim_groups, lr=lr, eps=eps, betas=betas, fused=fused)
 
     return optimizer
 
 
 def compute_rm_comparison_loss(rewards: torch.Tensor) -> torch.Tensor:
+    """Compute RM comparison loss.
+    Note we assume the rewards are for the ordered completions for a given prompt, where the best completion is the first, and worst completion is the last.
+    """
     assert len(rewards.shape) == 1  # [num_completions]
 
     loss = None
@@ -154,6 +157,9 @@ def compute_rm_comparison_loss(rewards: torch.Tensor) -> torch.Tensor:
 
 @torch.no_grad()
 def compute_metrics(rewards: torch.Tensor) -> Tuple[int, int]:
+    """Compute number of accurate predictions in terms of reward values.
+    Note we assume the rewards are for the ordered completions for a given prompt, where the best completion is the first, and worst completion is the last.
+    """
     assert len(rewards.shape) == 1  # [num_completions]
 
     N = len(rewards)  # number of completions
@@ -176,7 +182,6 @@ def compute_metrics(rewards: torch.Tensor) -> Tuple[int, int]:
 
 
 def run_single_train_step(
-    ctx,
     model,
     rank,
     world_size,
@@ -210,34 +215,34 @@ def run_single_train_step(
     optimizer.zero_grad(set_to_none=True)
 
     # here one sample is a prompt and a list of completions, where the completions are already ordered by the score, from best to worst
-    for batch_sequence, terminal_steps in itertools.islice(train_loader, cfg.gradient_accum_steps):
-        with ctx:
-            batch_sequence = batch_sequence.to(local_rank, non_blocking=True)
-            terminal_steps = terminal_steps.to(local_rank, non_blocking=True)
+    for batch_sequence, loss_mask in itertools.islice(train_loader, cfg.gradient_accum_steps):
+        batch_sequence = batch_sequence.to(local_rank, non_blocking=True)
+        loss_mask = loss_mask.to(local_rank, non_blocking=True)
 
-            assert len(batch_sequence) == len(terminal_steps)
+        assert len(batch_sequence) == len(loss_mask)
 
-            B = len(batch_sequence)  # current batch size
+        B = len(batch_sequence)  # current batch size
 
-            # forward pass to compute reward for all completions
-            outputs = []
-            for i in range(0, B, cfg.micro_batch_size):
-                end_idx = i + cfg.micro_batch_size
-                micro_batch_tokens = batch_sequence[i:end_idx]
-                output = model(micro_batch_tokens)
+        # forward pass to compute reward for all completions
+        outputs = []
+        for i in range(0, B, cfg.micro_batch_size):
+            end_idx = i + cfg.micro_batch_size
+            micro_batch_tokens = batch_sequence[i:end_idx]
+            outputs.append(model(micro_batch_tokens))
 
-                outputs.append(output)
+        outputs = torch.concat(outputs, dim=0).to(local_rank).squeeze(-1)  # [batch_size, batch_seq_len]
 
-            outputs = torch.concat(outputs, dim=0).to(local_rank).squeeze(-1)
+        assert outputs.shape == loss_mask.shape
 
-            # get rewards for terminal step, where the token ends with </s>
-            rewards = torch.gather(outputs, dim=1, index=terminal_steps)
-            rewards = rewards.squeeze()
+        # get rewards for terminal step, where the token ends with </s>
+        # rewards = torch.gather(outputs, dim=1, index=terminal_steps)
+        # only use rewards from completion, and then average rewards
+        rewards = torch.mean(outputs * loss_mask, dim=1)  # [batch_size]
 
-            # compute loss
-            loss = compute_rm_comparison_loss(rewards)
-            # scale the loss to account for gradient accumulation
-            scaled_loss = loss / cfg.gradient_accum_steps
+        # compute loss
+        loss = compute_rm_comparison_loss(rewards)
+        # scale the loss to account for gradient accumulation
+        scaled_loss = loss / cfg.gradient_accum_steps
 
         if scaler is not None:  # when using float16
             scaler.scale(scaled_loss).backward()
@@ -281,7 +286,7 @@ def run_single_train_step(
 
 
 @torch.no_grad()
-def run_validation_steps(ctx, model, rank, world_size, val_loader):
+def run_validation_steps(model, rank, world_size, val_loader):
     """Run M validation iterations"""
 
     model.eval()  # set model in validation mode
@@ -294,36 +299,35 @@ def run_validation_steps(ctx, model, rank, world_size, val_loader):
 
     # here one sample is a prompt and a list of completions, where the completions are already ordered by the score, from best to worst
     for batch_sequence, terminal_steps in itertools.islice(val_loader, cfg.val_iters):
-        with ctx:
-            batch_sequence = batch_sequence.to(local_rank, non_blocking=True)
-            terminal_steps = terminal_steps.to(local_rank, non_blocking=True)
+        batch_sequence = batch_sequence.to(local_rank, non_blocking=True)
+        terminal_steps = terminal_steps.to(local_rank, non_blocking=True)
 
-            assert len(batch_sequence) == len(terminal_steps)
+        assert len(batch_sequence) == len(terminal_steps)
 
-            B = len(batch_sequence)  # current batch size
+        B = len(batch_sequence)  # current batch size
 
-            # forward pass to compute reward for all completions
-            outputs = []
-            for i in range(0, B, cfg.micro_batch_size):
-                end_idx = i + cfg.micro_batch_size
-                micro_batch_tokens = batch_sequence[i:end_idx]
-                output = model(micro_batch_tokens)
+        # forward pass to compute reward for all completions
+        outputs = []
+        for i in range(0, B, cfg.micro_batch_size):
+            end_idx = i + cfg.micro_batch_size
+            micro_batch_tokens = batch_sequence[i:end_idx]
+            output = model(micro_batch_tokens)
 
-                outputs.append(output)
+            outputs.append(output)
 
-            outputs = torch.concat(outputs, dim=0).to(local_rank).squeeze(-1)
+        outputs = torch.concat(outputs, dim=0).to(local_rank).squeeze(-1)
 
-            # get rewards for terminal step, where the token ends with </s>
-            rewards = torch.gather(outputs, dim=1, index=terminal_steps)
-            rewards = rewards.squeeze()
+        # get rewards for terminal step, where the token ends with </s>
+        rewards = torch.gather(outputs, dim=1, index=terminal_steps)
+        rewards = rewards.squeeze()
 
-            # compute loss
-            loss = compute_rm_comparison_loss(rewards)
-            num_acc, num_samples = compute_metrics(rewards.detach())
-            metrics[0] += loss.item()  # sum up batch loss
-            metrics[1] += 1  # increase number of batches
-            metrics[2] += num_acc  # sum up number of accurate prediction tokens
-            metrics[3] += num_samples  # sum up number of completion
+        # compute loss
+        loss = compute_rm_comparison_loss(rewards)
+        num_acc, num_samples = compute_metrics(rewards.detach())
+        metrics[0] += loss.item()  # sum up batch loss
+        metrics[1] += 1  # increase number of batches
+        metrics[2] += num_acc  # sum up number of accurate prediction tokens
+        metrics[3] += num_samples  # sum up number of completion
 
     if inner_pbar is not None:
         inner_pbar.update(1)
@@ -343,6 +347,9 @@ def custom_collate_fn(batch, pad_id: int, max_seq_len: int, full_pad: bool = Fal
 
     item = batch[0]
     prompt = torch.tensor(item[0], dtype=torch.long)
+
+    # Note we assume the rewards are for the ordered completions for a given prompt,
+    # where the best completion is the first, and worst completion is the last.
     completions = item[1]
 
     max_batch_seq_len = max([len(prompt) + len(completion) for completion in completions])
@@ -355,17 +362,24 @@ def custom_collate_fn(batch, pad_id: int, max_seq_len: int, full_pad: bool = Fal
     batch_size = len(completions)
 
     batch_sequences = torch.full((batch_size, max_batch_seq_len), pad_id, dtype=torch.long)
-    terminal_steps = torch.zeros((batch_size, 1), dtype=torch.long)
+
+    # loss mask where 1s are are completion tokens, and 0s are prompt or padding tokens
+    loss_mask = torch.full((batch_size, max_batch_seq_len), 0, dtype=torch.long)
 
     for i, completion in enumerate(completions):
         completion = torch.tensor(completion, dtype=torch.long)
+
+        # need prompt, completion lengths to compute loss mask
+        prompt_len, completion_len = len(prompt), len(completion)
+
         seq = torch.concat((prompt, completion), dim=0).type(torch.long)
         seq_len = len(seq)
 
         batch_sequences[i, :seq_len] = seq
-        terminal_steps[i] = seq_len - 1  # indexing starts from zero
+        # set completion tokens to 1, we start from prompt_len + 1 because we skip the first completion token
+        loss_mask[i, prompt_len + 1 : prompt_len + completion_len] = 1
 
-    return batch_sequences, terminal_steps
+    return batch_sequences, loss_mask
 
 
 def main():
@@ -433,6 +447,8 @@ def main():
     torch.cuda.set_device(local_rank)
     clear_gpu_cache(local_rank)
 
+    assert cfg.train_head == 'scalar_head'
+
     with lora(r=cfg.lora_r, alpha=cfg.lora_alpha, dropout=cfg.lora_dropout, enabled=True):
         model_args = ModelArgs.from_model_type(cfg.model_type)
         model_args.vocab_size = tokenizer.vocab_size
@@ -455,6 +471,8 @@ def main():
 
             del model_state
 
+    model.init_head_weights()
+
     mark_only_lora_as_trainable(model, bias=cfg.train_bias, head=cfg.train_head)
 
     # try to convert the model to half precision, otherwise we can't even move the 7B model to a single RTX 3090
@@ -472,11 +490,11 @@ def main():
     else:
         logger.warning('Training in float32 mode, make sure you have enough GPU RAM')
 
-    mp_ctx = torch.cuda.amp.autocast(dtype=train_dtype, cache_enabled=False)
-
     # BUG in pytorch 2.0.1, as we found out using torch.autocast will increase GPU RAM usage, and cause CUDA OUT OF MEMORY error
     # when run the training script on a single RTX 3090
-    # so here we manually move the model to half precision
+    # so here we manually set the model to half precision
+
+    # mp_ctx = torch.cuda.amp.autocast(dtype=train_dtype, cache_enabled=False)
 
     for name, module in model.named_modules():
         if 'norm' in name:  # for better performance, always use full precision for normalization layers
@@ -535,7 +553,6 @@ def main():
     model.train()
     for iter in range(1, cfg.max_train_iters + 1):
         train_stats = run_single_train_step(
-            ctx=mp_ctx,
             model=model,
             rank=rank,
             world_size=world_size,
@@ -572,7 +589,7 @@ def main():
 
         # validation steps
         if cfg.val_iters > 0 and (cfg.val_interval > 0 and iter % cfg.val_interval == 0 or iter == cfg.max_train_iters):
-            val_stats = run_validation_steps(ctx=mp_ctx, model=model, rank=rank, world_size=world_size, val_loader=val_loader)
+            val_stats = run_validation_steps(model=model, rank=rank, world_size=world_size, val_loader=val_loader)
 
             if rank == 0:
                 logger.info(

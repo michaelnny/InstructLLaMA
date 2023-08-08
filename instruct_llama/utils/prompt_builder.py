@@ -30,21 +30,17 @@ Dialog = List[Message]
 
 B_INST, E_INST = '[INST]', '[/INST]'
 B_SYS, E_SYS = '<<SYS>>\n', '\n<</SYS>>\n\n'
-DEFAULT_SYSTEM_PROMPT = """\
-You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe. Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.
-
-If a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."""
 
 
 def maybe_add_system_prompt(dialog: Dialog) -> Dialog:
-    """Insert a dialog with system role at the beginning of the list if there're no such one."""
+    """Try to insert an empty system prompt at the beginning to make code consistent."""
     assert dialog is not None and len(dialog) > 0
 
     if dialog[0]['role'] != 'system':
         dialog = [
             {
                 'role': 'system',
-                'content': DEFAULT_SYSTEM_PROMPT,
+                'content': '',
             }
         ] + dialog
 
@@ -62,9 +58,8 @@ def build_prompt_completion(dialog: Dialog, tokenizer: Tokenizer) -> Tuple[List[
 
     """
 
-    assert dialog is not None and len(dialog) > 0
+    assert dialog is not None and len(dialog) >= 1
 
-    # make sure the first one is always system prompt
     dialog = maybe_add_system_prompt(dialog)
 
     assert len(dialog) >= 2
@@ -87,7 +82,11 @@ def build_prompt_completion(dialog: Dialog, tokenizer: Tokenizer) -> Tuple[List[
         if i == 1:
             # add system prompt, note Meta llama-2 insert the system prompt inside the first user prompt
             # as in this format: [INST] <<SYS>>\n{system prompt}\n<</SYS>>\n\n{1st user prompt} [/INST]
-            sys_prompt = B_SYS + dialog[0]['content'] + E_SYS
+            sys_prompt = dialog[0]['content'].strip()
+            if len(sys_prompt) > 0:
+                sys_prompt = B_SYS + sys_prompt + E_SYS
+            else:
+                sys_prompt = ''
             full_prompt = f"{B_INST} {sys_prompt}{(prompt['content']).strip()} {E_INST}"
         else:
             full_prompt = f"{B_INST} {(prompt['content']).strip()} {E_INST}"
@@ -96,13 +95,12 @@ def build_prompt_completion(dialog: Dialog, tokenizer: Tokenizer) -> Tuple[List[
         # here we skip the last answer by the assistant, since it's used for building the training target
         if i + 1 < len(dialog) - 1 and dialog[i + 1]['role'] == 'assistant':
             answer = dialog[i + 1]
-            full_prompt += f" {(answer['content']).strip()} "
+            full_prompt += f" {(answer['content']).strip()}"
 
         prompts.append(full_prompt)
 
+    # Concatenate and tokenize the full prompt, note llama-2, we add BOS and EOS for every pair of user-prompt:answer, except for the last user-prompt
     prompt_tokens = []
-
-    # Note llama-2, we add BOS and EOS for every pair of user-prompt:answer, except for the last user-prompt
     for i, prompt in enumerate(prompts):
         if i < len(prompts) - 1:
             tokens = tokenizer.encode(prompt, bos=True, eos=True)
@@ -110,11 +108,11 @@ def build_prompt_completion(dialog: Dialog, tokenizer: Tokenizer) -> Tuple[List[
             tokens = tokenizer.encode(prompt, bos=True, eos=False)
         prompt_tokens.extend(tokens)
 
-    # completion tokens for training
+    # build completion tokens for training
     completion_tokens = None
     if dialog[-1]['role'] == 'assistant':
         answer = dialog[-1]
-        target = f" {(answer['content']).strip()} "
+        target = f" {(answer['content']).strip()}"
         completion_tokens = tokenizer.encode(target, bos=False, eos=True)
 
     return prompt_tokens, completion_tokens
@@ -151,6 +149,8 @@ if __name__ == '__main__':
             {'role': 'assistant', 'content': 'You should go to The Eiffel Tower.'},
             {'role': 'user', 'content': "What's so special about it?"},
             {'role': 'assistant', 'content': "Just go there and you'll find out."},
+            {'role': 'user', 'content': 'Can you be more specific?'},
+            {'role': 'assistant', 'content': 'What do you mean be more specific?'},
         ],
     ]
 

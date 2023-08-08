@@ -18,7 +18,8 @@ from instruct_llama.model import Transformer, ModelArgs, supported_model_types
 from instruct_llama.lora import lora
 
 
-def del_lora_state_dict(model: nn.Module):
+def get_clean_state_dict(model: nn.Module):
+    """Clean up lora weights and return cleaned state dict."""
     model_dict = model.state_dict()
     key_to_delete = [k for k in model_dict if 'lora_' in k]
     for del_key in key_to_delete:
@@ -32,7 +33,12 @@ def lora_model_lookup(checkpoint: dict) -> int:
 
 
 def merge_lora_checkpoint(
-    model_type: str, lora_ckpt_path: str, pretrained_ckpt_dir: str, save_path: str, dtype: torch.dtype = torch.bfloat16
+    model_type: str,
+    lora_ckpt_path: str,
+    pretrained_ckpt_dir: str,
+    save_path: str,
+    lora_alpha: int = 32,
+    dtype: torch.dtype = torch.bfloat16,
 ) -> None:
     """Merges LoRA weights with pretrained base model.
 
@@ -42,6 +48,8 @@ def merge_lora_checkpoint(
             `finetune_lora.py`.
         pretrained_ckpt_dir: The pretrained checkpoint used in side the `finetune_lora.py` when start the fine-tuning.
         save_path: target path to save the merged stat_dict.
+        lora_alpha: the lora alpha value used during fine-tuning, default 32.
+        dtype: save model weights and biases in the given target data type, default torch.bfloat16.
     """
 
     assert model_type in supported_model_types
@@ -73,7 +81,7 @@ def merge_lora_checkpoint(
     # find the rank from LoRA checkpoint
     rank = lora_model_lookup(lora_checkpoint)
 
-    with lora(r=rank, alpha=32, dropout=0.0, enabled=True):
+    with lora(r=rank, alpha=lora_alpha, dropout=0.0, enabled=True):
         model_args = ModelArgs.from_model_type(model_type)
 
         model = Transformer(model_args)
@@ -83,17 +91,13 @@ def merge_lora_checkpoint(
         # 2. Load the fine-tuned lora weights
         model.load_state_dict(lora_checkpoint, strict=False)
 
-    for name, module in model.named_modules():
-        if 'norm' in name:  # for better performance, always use full precision for normalization layers
-            module = module.to(dtype=torch.float32)
-        else:
-            module = module.to(dtype=dtype)
-
+    # convert to target dtype
+    model.to(dtype=dtype)
     model.eval()
 
-    state_dict = del_lora_state_dict(model)
+    state_dict = get_clean_state_dict(model)
 
-    print(f'Saving marged model weights to {save_path} ...')
+    print(f'Saving merged model weights to {save_path} ...')
     torch.save(state_dict, save_path)
 
     print(f'Copying params.json to {output_dir}...')
@@ -103,7 +107,7 @@ def merge_lora_checkpoint(
 if __name__ == '__main__':
     merge_lora_checkpoint(
         model_type='7B',
-        lora_ckpt_path='./checkpoints/finetune_lora/lora_7B-iter-1000.pth',
+        lora_ckpt_path='./checkpoints/finetune_lora/lora_7B-iter-2000.pth',
         pretrained_ckpt_dir='./checkpoints/llama-2/llama-2-7b/',
-        save_path='./checkpoints/7b-finetune/iter-1000-merged.pth',
+        save_path='./checkpoints/7b-finetune/iter-2000-merged.pth',
     )

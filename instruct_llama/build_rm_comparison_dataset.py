@@ -41,7 +41,7 @@ Metadata = Mapping[Text, Text]
 
 DEFAULT_SYSTEM_PROMPT = {
     'role': 'system',
-    'content': "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe. Please ensure that your responses are socially unbiased and correct. If you don't know the answer to a question, please don't share false information.",
+    'content': '',
 }
 
 # this will be inserted into the training data as the first system prompt
