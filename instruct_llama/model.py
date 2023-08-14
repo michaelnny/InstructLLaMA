@@ -263,21 +263,16 @@ class Transformer(nn.Module):
 
         self.freqs_cis = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.max_seq_len * 2)
 
-    def init_head_weights(self):
-        head = None
-        if self.params.head_type == 'lm_head':
-            head = self.lm_head
-        elif self.params.head_type == 'scalar_head':
+    def init_scalar_head_weights(self):
+        if self.params.head_type == 'scalar_head':
             head = self.scalar_head
+            print('Initialize weights for model scalar head...')
 
-        if head is None:
-            return
-
-        print('Initialize weights for model head...')
-
-        init_std = 1.0 / np.sqrt(self.params.dim + 1)
-        torch.nn.init.normal_(head.weight, std=init_std)
-        torch.nn.init.zeros_(head.bias)
+            init_std = 1.0 / np.sqrt(self.params.dim + 1)
+            torch.nn.init.normal_(head.weight, std=init_std)
+            torch.nn.init.zeros_(head.bias)
+        else:
+            print('Nothing to do')
 
     def forward(self, tokens: torch.Tensor, start_pos: int = 0) -> torch.Tensor:
         _bsz, seqlen = tokens.shape

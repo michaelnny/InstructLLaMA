@@ -247,17 +247,19 @@ class FineTuneDataset(Dataset):
 
 class ComparisonsDataset(Dataset):
     def __init__(
-        self, data_sources: Iterable[str], min_completions: int = 2, max_completions: int = 9, max_seq_len: int = 2048
+        self, data_sources: Iterable[str], min_completions: int = 4, max_completions: int = 9, max_seq_len: int = 2048
     ) -> None:
         """
         Args:
             data_sources: a list of string path to where to load the dataset.
+            min_completions: minimum number of completions per sample, sample with lesser completions will be discarded.
+            max_completions: maximum number of completions per sample.
             max_seq_len: prompt_tokens + completion_tokens length greater than this will be discarded.
         """
         assert len(data_sources) > 0
         assert max_seq_len > 128
 
-        assert min_completions >= 2 and max_completions > min_completions
+        assert min_completions >= 2 and max_completions >= min_completions
 
         self.data_sources = data_sources
         self.max_seq_len = max_seq_len

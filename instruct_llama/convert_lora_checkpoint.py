@@ -105,9 +105,18 @@ def merge_lora_checkpoint(
 
 
 if __name__ == '__main__':
+    # fine-tuned model
+    # merge_lora_checkpoint(
+    #     model_type='7B',
+    #     lora_ckpt_path='./checkpoints/finetune_lora/lora_7B-iter-2000.pth',
+    #     pretrained_ckpt_dir='./meta_checkpoints/llama-2/llama-2-7b/',
+    #     save_path='./checkpoints/7b-finetune/iter-2000-merged.pth',
+    # )
+
+    # RM model
     merge_lora_checkpoint(
         model_type='7B',
-        lora_ckpt_path='./checkpoints/finetune_lora/lora_7B-iter-2000.pth',
-        pretrained_ckpt_dir='./checkpoints/llama-2/llama-2-7b/',
-        save_path='./checkpoints/7b-finetune/iter-2000-merged.pth',
+        lora_ckpt_path='./checkpoints/train_rm_lora/lora_7B-iter-3200.pth',
+        pretrained_ckpt_dir='./checkpoints/7b-finetune/',
+        save_path='./checkpoints/7b-rm/iter-3200-merged.pth',
     )

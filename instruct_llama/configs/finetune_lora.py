@@ -10,8 +10,8 @@ class config:
     model_type: str = '7B'  # 7B, 13B, 70B
     head_type: str = 'lm_head'
 
-    pretrain_ckpt_file: str = './checkpoints/llama-2/llama-2-7b/consolidated.pth'  # load pretrained checkpoint
-    tokenizer_file: str = './checkpoints/llama-2/tokenizer.model'  # load tokenizer model
+    pretrain_ckpt_file: str = './meta_checkpoints/llama-2/llama-2-7b/consolidated.pth'  # load pretrained checkpoint
+    tokenizer_file: str = './meta_checkpoints/llama-2/tokenizer.model'  # load tokenizer model
 
     # datasets
     train_datasources: Tuple[str] = (
@@ -44,7 +44,7 @@ class config:
     val_interval: int = 100
     val_iters: int = 200  # large size since micro_batch_size is very small
     log_interval: int = 20  # log training metrics (loss, accuracy)
-    ckpt_interval: int = 100  # save model checkpoints every N training iterations
+    ckpt_interval: int = 500  # save model checkpoints every N training iterations
 
     # LoRA configuration
     lora_r: int = 32

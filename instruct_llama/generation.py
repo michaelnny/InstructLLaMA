@@ -67,10 +67,9 @@ class Llama:
         model.load_state_dict(checkpoint, strict=False)
         print(f'Loaded in {time.time() - start_time:.2f} seconds')
 
-        # for params in model.parameters():
-        #     params.requires_grad = False
-
-        # model = model.eval()
+        for params in model.parameters():
+            params.requires_grad = False
+        model = model.eval()
 
         return Llama(model, tokenizer)
 

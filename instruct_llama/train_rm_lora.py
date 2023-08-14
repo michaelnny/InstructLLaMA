@@ -142,15 +142,27 @@ def compute_rm_comparison_loss(rewards: torch.Tensor) -> torch.Tensor:
     assert N >= 2
     assert C >= 1
 
+    # for each better completion 0, 1, ..., N-1, compare to the remaining of worse completions
+    # for example:
+    # 0 <-> (1, 2, ..., N)
+    # 1 <-> (2, 3, ..., N)
+    # N-1 <-> (N)
     for i in range(0, N - 1):
-        r_better = rewards[i]
-        for j in range(i + 1, N):
-            r_worser = rewards[j]
+        r_worser = rewards[i + 1 :]
+        r_better = rewards[i].repeat(len(r_worser))
+        assert r_better.shape == r_worser.shape
+        assert len(r_better) == len(r_worser)
 
-            if loss is None:
-                loss = (1 / C) * -torch.log(torch.sigmoid(r_better - r_worser))
-            else:
-                loss += (1 / C) * -torch.log(torch.sigmoid(r_better - r_worser))
+        l_i = -torch.log(torch.sigmoid(r_better - r_worser)).sum()
+        if loss is None:
+            loss = l_i
+        else:
+            loss += l_i
+
+    assert loss is not None
+
+    # average over number of combinations
+    loss = loss / C
 
     return loss
 
@@ -170,13 +182,13 @@ def compute_metrics(rewards: torch.Tensor) -> Tuple[int, int]:
 
     num_accurate = 0
 
+    # for each better completion, compare to the remaining of worse completions
     for i in range(0, N - 1):
-        r_better = rewards[i]
-        for j in range(i + 1, N):
-            r_worser = rewards[j]
+        r_worser = rewards[i + 1 :]
+        r_better = rewards[i].repeat(len(r_worser))
 
-            if r_better > r_worser:
-                num_accurate += 1
+        # Perform element-wise comparison
+        num_accurate += (r_better > r_worser).sum().item()
 
     return num_accurate, C
 
@@ -215,11 +227,11 @@ def run_single_train_step(
     optimizer.zero_grad(set_to_none=True)
 
     # here one sample is a prompt and a list of completions, where the completions are already ordered by the score, from best to worst
-    for batch_sequence, loss_mask in itertools.islice(train_loader, cfg.gradient_accum_steps):
+    for batch_sequence, terminal_steps in itertools.islice(train_loader, cfg.gradient_accum_steps):
         batch_sequence = batch_sequence.to(local_rank, non_blocking=True)
-        loss_mask = loss_mask.to(local_rank, non_blocking=True)
+        terminal_steps = terminal_steps.to(local_rank, non_blocking=True)
 
-        assert len(batch_sequence) == len(loss_mask)
+        assert len(batch_sequence) == len(terminal_steps)
 
         B = len(batch_sequence)  # current batch size
 
@@ -232,12 +244,10 @@ def run_single_train_step(
 
         outputs = torch.concat(outputs, dim=0).to(local_rank).squeeze(-1)  # [batch_size, batch_seq_len]
 
-        assert outputs.shape == loss_mask.shape
-
-        # get rewards for terminal step, where the token ends with </s>
-        # rewards = torch.gather(outputs, dim=1, index=terminal_steps)
-        # only use rewards from completion, and then average rewards
-        rewards = torch.mean(outputs * loss_mask, dim=1)  # [batch_size]
+        # get rewards for terminal step, where sequence ends with EOS token and before the padding tokens
+        # from reference:
+        # https://github.com/openai/lm-human-preferences/blob/cbfd210bb8b08f6bc5c26878c10984b90f516c66/lm_human_preferences/rewards.py#L47C48-L47C48
+        rewards = torch.gather(outputs, dim=1, index=terminal_steps).squeeze(1)  # [batch_size]
 
         # compute loss
         loss = compute_rm_comparison_loss(rewards)
@@ -252,7 +262,7 @@ def run_single_train_step(
         if return_stats:
             num_acc, num_samples = compute_metrics(rewards.detach())
             metrics[0] += loss.item()  # sum up batch loss
-            metrics[1] += 1  # increase number of batches
+            metrics[1] += 1  # increase number of micro batches
             metrics[2] += num_acc  # sum up number of accurate prediction tokens
             metrics[3] += num_samples  # sum up number of completion
 
@@ -317,20 +327,19 @@ def run_validation_steps(model, rank, world_size, val_loader):
 
         outputs = torch.concat(outputs, dim=0).to(local_rank).squeeze(-1)
 
-        # get rewards for terminal step, where the token ends with </s>
-        rewards = torch.gather(outputs, dim=1, index=terminal_steps)
-        rewards = rewards.squeeze()
+        # get rewards for terminal step, where sequence ends with EOS token and before the padding tokens
+        rewards = torch.gather(outputs, dim=1, index=terminal_steps).squeeze(1)  # [batch_size]
 
         # compute loss
         loss = compute_rm_comparison_loss(rewards)
-        num_acc, num_samples = compute_metrics(rewards.detach())
+        num_acc, num_samples = compute_metrics(rewards)
         metrics[0] += loss.item()  # sum up batch loss
         metrics[1] += 1  # increase number of batches
         metrics[2] += num_acc  # sum up number of accurate prediction tokens
         metrics[3] += num_samples  # sum up number of completion
 
-    if inner_pbar is not None:
-        inner_pbar.update(1)
+        if inner_pbar is not None:
+            inner_pbar.update(1)
 
     val_loss = metrics[0] / metrics[1]
     val_accuracy = 100 * metrics[2] / metrics[3]
@@ -363,23 +372,17 @@ def custom_collate_fn(batch, pad_id: int, max_seq_len: int, full_pad: bool = Fal
 
     batch_sequences = torch.full((batch_size, max_batch_seq_len), pad_id, dtype=torch.long)
 
-    # loss mask where 1s are are completion tokens, and 0s are prompt or padding tokens
-    loss_mask = torch.full((batch_size, max_batch_seq_len), 0, dtype=torch.long)
-
+    # record the terminal index of the completion, often referred to as the terminal time step in RL
+    terminal_steps = torch.zeros((batch_size, 1), dtype=torch.long)
     for i, completion in enumerate(completions):
         completion = torch.tensor(completion, dtype=torch.long)
-
-        # need prompt, completion lengths to compute loss mask
-        prompt_len, completion_len = len(prompt), len(completion)
-
         seq = torch.concat((prompt, completion), dim=0).type(torch.long)
         seq_len = len(seq)
 
         batch_sequences[i, :seq_len] = seq
-        # set completion tokens to 1, we start from prompt_len + 1 because we skip the first completion token
-        loss_mask[i, prompt_len + 1 : prompt_len + completion_len] = 1
+        terminal_steps[i] = seq_len - 1  # minus 1 because indexing starts from zero
 
-    return batch_sequences, loss_mask
+    return batch_sequences, terminal_steps
 
 
 def main():
@@ -471,7 +474,7 @@ def main():
 
             del model_state
 
-    model.init_head_weights()
+    model.init_scalar_head_weights()
 
     mark_only_lora_as_trainable(model, bias=cfg.train_bias, head=cfg.train_head)
 

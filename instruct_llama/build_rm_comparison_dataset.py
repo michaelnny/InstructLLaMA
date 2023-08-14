@@ -303,6 +303,9 @@ def process_stackexchange_dataset(
 
     datasets = []
 
+    if num_files < num_workers:
+        num_workers = num_files
+
     # Create a ProcessPoolExecutor with maximum N processes
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
         futures = [executor.submit(process_file_func, file) for i, file in enumerate(working_files)]
@@ -333,7 +336,7 @@ def process_stackexchange_dataset(
 
 
 if __name__ == '__main__':
-    tokenizer = Tokenizer(model_path='./checkpoints/llama-2/tokenizer.model')
+    tokenizer = Tokenizer(model_path='./meta_checkpoints/llama-2/tokenizer.model')
 
     process_stackexchange_dataset(
         src_dir='./raw_data/stackexchange_dataset',

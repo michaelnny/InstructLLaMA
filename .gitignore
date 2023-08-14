@@ -4,12 +4,13 @@
 # Datasets
 raw_data/
 datasets/
-
 *.tar
 *.zst
 *.jsonl
 
+
 # Checkpoints
+meta_checkpoints/*
 checkpoints/*
 
 
@@ -18,8 +19,6 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# PyBuilder
-target/
 
 # Jupyter Notebook
 .ipynb_checkpoints

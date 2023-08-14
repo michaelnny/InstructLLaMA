@@ -16,9 +16,6 @@ from instruct_llama.tokenizer import Tokenizer
 from instruct_llama.utils import build_prompt_completion
 
 
-DEFAULT_SYSTEM_PROMPT = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe. Please ensure that your responses are socially unbiased and correct. If you don't know the answer to a question, please don't share false information."
-
-
 class PromptEnv:
     def __init__(
         self,
@@ -50,7 +47,7 @@ class PromptEnv:
         self.default_prompt = [
             {
                 'role': 'system',
-                'content': sys_prompt if sys_prompt is not None and isinstance(sys_prompt, str) else DEFAULT_SYSTEM_PROMPT,
+                'content': sys_prompt if sys_prompt is not None and isinstance(sys_prompt, str) else '',
             }
         ]
 
@@ -103,7 +100,7 @@ class PromptEnv:
         # [1, sequence_length, 1]
         output = self.reward_model(tokens)
 
-        # [1]
-        reward = output.squeeze()[-1]
+        # get reward for terminal time step, where the sequence ends with EOS token
+        reward = output.squeeze()[-1]  # [1]
 
         return reward.cpu().item()

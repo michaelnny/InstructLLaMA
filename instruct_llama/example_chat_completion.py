@@ -90,7 +90,7 @@ These are just a few of the many attractions that Paris has to offer. With so mu
 
 if __name__ == '__main__':
     main(
-        # ckpt_dir="./checkpoints/llama-2/llama-2-7b-chat",  # Meta fine-tuned chat model
+        # ckpt_dir="./meta_checkpoints/llama-2/llama-2-7b-chat",  # Meta fine-tuned chat model
         ckpt_dir='./checkpoints/7b-finetune',  # our fine-tuned chat model
         tokenizer_path='./checkpoints/llama-2/tokenizer.model',
     )

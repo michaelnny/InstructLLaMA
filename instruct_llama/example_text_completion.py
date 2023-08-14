@@ -26,21 +26,21 @@ def main(
         tokenizer_path=tokenizer_path,
         max_seq_len=max_seq_len,
         max_batch_size=max_batch_size,
-        device="cuda",
+        device='cuda',
     )
 
     prompts = [
         # For these prompts, the expected answer is the natural continuation of the prompt
-        "I believe the meaning of life is",
-        "Simply put, the theory of relativity states that ",
+        'I believe the meaning of life is',
+        'Simply put, the theory of relativity states that ',
         """A brief message congratulating the team on the launch:
 
         Hi everyone,
-        
+
         I just """,
         # Few shot prompt (providing a few examples before asking model to complete more);
         """Translate English to French:
-        
+
         sea otter => loutre de mer
         peppermint => menthe poivrée
         plush girafe => girafe peluche
@@ -55,11 +55,11 @@ def main(
     for prompt, result in zip(prompts, results):
         print(prompt)
         print(f"> {result['generation']}")
-        print("\n==================================\n")
+        print('\n==================================\n')
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main(
-        ckpt_dir="./checkpoints/llama-2/llama-2-7b/",
-        tokenizer_path="./checkpoints/llama-2/tokenizer.model",
+        ckpt_dir='./meta_checkpoints/llama-2/llama-2-7b/',
+        tokenizer_path='./checkpoints/llama-2/tokenizer.model',
     )
