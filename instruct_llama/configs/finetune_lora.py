@@ -51,7 +51,7 @@ class config:
     lora_alpha: int = 32
     lora_dropout: float = 0.1
     train_bias: str = 'none'  # none, lora_only, all
-    train_head: str = 'lm_head'  # none, lm_head, the performance is not great when also train head
+    train_head: bool = True  # optional
 
     # learning rate scheduler, if also train head, should use a much smaller learning rate
     init_lr: float = 1e-7  # use a much smaller initial learning rate

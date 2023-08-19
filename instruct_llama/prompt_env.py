@@ -1,4 +1,10 @@
-"""A simple prompt environment module that the RL agent can interact with."""
+"""A simple prompt environment that RL agent can interact with."""
+from typing import Iterable, Tuple, List
+import random
+import math
+import itertools
+import pickle
+import numpy as np
 import torch
 
 
@@ -19,88 +25,205 @@ from instruct_llama.utils import build_prompt_completion
 class PromptEnv:
     def __init__(
         self,
-        tokenizer: Tokenizer,
-        max_steps: 1024,
+        data_sources: Iterable[str],
+        max_seq_len: 1024,
         reward_model: Transformer,
         runtime_dtype: torch.dtype = torch.bfloat16,
         runtime_device: torch.device = 'cpu',
-        sys_prompt: str = None,
     ) -> None:
-        assert 0 < max_steps < reward_model.params.max_seq_len
+        assert 0 < max_seq_len <= reward_model.params.max_seq_len
+
+        # same logic as the fine-tune datasets
+        self.max_seq_len = max_seq_len
+
+        self.data = []
+        seq_length_stats = []  # track statistics
+
+        # Load datasets
+        for source in data_sources:
+            samples = pickle.load(open(source, 'rb'))
+            for sample in samples:
+                # we only need prompt for the environment, as the completion should be given by the RL agent
+                x = sample['prompt_tokens']
+                seq_length = len(x)
+                if seq_length <= self.max_seq_len:
+                    self.data.append(x)
+                    seq_length_stats.append(seq_length)
+
+        assert len(self.data) > 0
+
+        self.total_num_tokens = sum(seq_length_stats)
+        self.seq_length_stats = {
+            'min': int(np.min(seq_length_stats)),
+            'max': int(np.max(seq_length_stats)),
+            'mean': int(np.mean(seq_length_stats)),
+            'std': int(np.std(seq_length_stats)),
+        }
+        random.shuffle(self.data)
+
+        print(f'Number of sample prompts: {len(self.data)}')
+        print(f'Sample prompt length statistics: {self.seq_length_stats}')
 
         # freeze all layers
         for n, p in reward_model.named_parameters():
             p.requires_grad = False
 
         self.device = runtime_device
-        self.reward_model = reward_model.to(device=self.device, dtype=runtime_dtype)
+        self.reward_model = reward_model.to(dtype=runtime_dtype, device=self.device)
         self.reward_model.eval()
 
-        self.max_steps = max_steps
-        self.tokenizer = tokenizer
-        self.action_dim = tokenizer.vocab_size
-        self.terminal_action = tokenizer.eos_id
-        self.token_ids = None
+        self.prompt_tokens = None
+        self.terminal_steps = None
         self.done = True
-        self.t = 0
+        self.c_episodes = 0
 
-        self.default_prompt = [
-            {
-                'role': 'system',
-                'content': sys_prompt if sys_prompt is not None and isinstance(sys_prompt, str) else '',
-            }
-        ]
-
-    def observation(self) -> torch.Tensor:
-        assert self.token_ids is not None and len(self.token_ids) > 0
-
-        return torch.tensor(self.token_ids, dtype=torch.long)
-
-    def reset(self, prompt: str):
-        assert prompt is not None and isinstance(prompt, str) and len(prompt) > 0
-
-        dialog = self.default_prompt + [{'role': 'user', 'content': prompt}]
-
-        prompt_tokens, _ = build_prompt_completion(dialog, self.tokenizer)
-        assert prompt_tokens is not None
-
-        self.token_ids = prompt_tokens
+    def reset(self) -> List[int]:
+        """Returns a random prompt."""
         self.done = False
-        self.t = 0
+        prompt_tokens = random.choice(self.data)
 
-        return self.observation()
+        self.prompt_tokens = prompt_tokens
 
-    def step(self, action: int):
-        if not isinstance(action, int):
-            raise ValueError(f'Expect action to be int type, got {type(action)}')
-        if action < 0 or action > self.action_dim - 1:
-            raise ValueError(f'Action out of range, expect in the range of [0, {self.action_dim -1}], got {action}')
+        return self.prompt_tokens
+
+    def step(self, completion_tokens: List[int]) -> float:
+        """Takes in a completion tokens, returns the estimated reward."""
+        if self.done:
+            raise RuntimeError('Call reset() before make_action()')
+
+        self.c_episodes += 1
+        self.done = True
+
+        rewards = self.compute_rewards(completion_tokens)
+        return rewards
+
+    @torch.inference_mode()
+    def compute_rewards(self, completion_tokens: List[int]) -> float:
+        tokens = self.prompt_tokens + completion_tokens
+        tokens = torch.tensor(tokens, dtype=torch.long, device=self.device)
+
+        # [1, sequence_length, 1]
+        outputs = self.reward_model(tokens.unsqueeze(0))
+
+        # get reward for terminal time step
+        rewards = outputs.squeeze()[-1]
+
+        return rewards.cpu().item()
+
+
+class PromptBatchedEnv:
+    def __init__(
+        self,
+        data_sources: Iterable[str],
+        max_seq_len: 1024,
+        batch_size: int,
+        pad_id: int,
+        reward_model: Transformer,
+        runtime_dtype: torch.dtype = torch.bfloat16,
+        runtime_device: torch.device = 'cpu',
+    ) -> None:
+        assert 0 < max_seq_len <= reward_model.params.max_seq_len
+        assert batch_size >= 1
+
+        # same logic as the fine-tune datasets
+        self.max_seq_len = max_seq_len
+        self.pad_id = pad_id
+
+        self.data = []
+        seq_length_stats = []  # track statistics
+
+        # Load datasets
+        for source in data_sources:
+            samples = pickle.load(open(source, 'rb'))
+            for sample in samples:
+                # we only need prompt for the environment, as the completion should be given by the RL agent
+                x = sample['prompt_tokens']
+                seq_length = len(x)
+                if seq_length <= self.max_seq_len:
+                    self.data.append(x)
+                    seq_length_stats.append(seq_length)
+
+        assert len(self.data) > 0
+
+        self.total_num_tokens = sum(seq_length_stats)
+        self.seq_length_stats = {
+            'min': int(np.min(seq_length_stats)),
+            'max': int(np.max(seq_length_stats)),
+            'mean': int(np.mean(seq_length_stats)),
+            'std': int(np.std(seq_length_stats)),
+        }
+        random.shuffle(self.data)
+
+        print(f'Number of sample prompts: {len(self.data)}')
+        print(f'Sample prompt length statistics: {self.seq_length_stats}')
+
+        # freeze all layers
+        for n, p in reward_model.named_parameters():
+            p.requires_grad = False
+
+        self.device = runtime_device
+        self.reward_model = reward_model.to(dtype=runtime_dtype, device=self.device)
+        self.reward_model.eval()
+        self.batch_size = batch_size
+
+        self.prompt_tokens = None
+        self.terminal_steps = None
+        self.done = True
+        self.c_episodes = 0
+
+    def set_batch_size(self, v: int) -> None:
+        assert v >= 1
+        self.batch_size = v
+
+        self.prompt_tokens = None
+        self.terminal_steps = None
+        self.done = True
+
+    def reset(self) -> List[List[int]]:
+        """Returns a list of random prompts."""
+        self.done = False
+        prompt_tokens = random.choices(self.data, k=self.batch_size)
+
+        max_prompt_len = max(len(t) for t in prompt_tokens)
+        assert max_prompt_len <= self.max_seq_len
+
+        self.prompt_tokens = prompt_tokens
+
+        return self.prompt_tokens
+
+    def step(self, completion_tokens: List[List[int]]) -> Tuple[List[float], bool]:
+        """Takes in a list of completion tokens, returns the estimated reward and a boolean flag indicate episode is terminated."""
         if self.done:
             raise RuntimeError('Call reset() before step()')
 
-        reward = 0.0
-        self.token_ids.append(action)
-        self.t += 1
-        if action == self.terminal_action:
-            self.done = True
-            reward = self.compute_estimated_reward()
+        assert len(completion_tokens) == len(self.prompt_tokens)
 
-        return self.observation(), reward, self.done
+        batch_size = len(self.prompt_tokens)
+
+        self.c_episodes += len(self.prompt_tokens)
+        self.done = True
+
+        max_seq_len = max(len(prompt) + len(completion) for prompt, completion in zip(self.prompt_tokens, completion_tokens))
+
+        tokens = torch.full((batch_size, max_seq_len), self.pad_id, dtype=torch.long)
+
+        # record the terminal index of the completion, often referred to as the terminal time step in RL
+        terminal_steps = torch.zeros((batch_size, 1), dtype=torch.long)
+
+        for i, p_tk, c_tk in enumerate(zip(self.prompt_tokens, completion_tokens)):
+            tokens[i, : len(p_tk) + len(c_tk)] = torch.concat((p_tk, c_tk), dim=0).type(torch.long)
+            terminal_steps[i] = len(p_tk) + len(c_tk) - 1  # minus 1 because indexing starts from zero
+
+        rewards = self.compute_rewardS(tokens, terminal_steps)
+
+        return rewards, self.done
 
     @torch.inference_mode()
-    def compute_estimated_reward(self) -> float:
-        if self.token_ids is None or len(self.token_ids) <= 1:
-            return 0.0
-        elif self.token_ids[-1] != self.terminal_action:
-            return 0.0
+    def compute_rewardS(self, batched_tokens: torch.Tensor, terminal_steps: torch.Tensor) -> List[float]:
+        # [batch_size, sequence_length]
+        outputs = self.reward_model(batched_tokens).squeeze(-1)
 
-        # [1, sequence_length]
-        tokens = self.observation().to(device=self.device).unsqueeze(0)
+        # get reward for terminal time step, where the sequence ends without counting the padding tokens
+        rewards = torch.gather(outputs, dim=1, index=terminal_steps).squeeze(1)  # [batch_size]
 
-        # [1, sequence_length, 1]
-        output = self.reward_model(tokens)
-
-        # get reward for terminal time step, where the sequence ends with EOS token
-        reward = output.squeeze()[-1]  # [1]
-
-        return reward.cpu().item()
+        return rewards.cpu().list()

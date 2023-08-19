@@ -226,7 +226,7 @@ class FineTuneDataset(Dataset):
             'std': int(np.std(seq_length_stats)),
         }
 
-        random.shuffle(self.data)
+        self.shuffle()
 
     def __len__(self):
         return len(self.data)
@@ -235,6 +235,9 @@ class FineTuneDataset(Dataset):
         x, y = self.data[idx]
 
         return torch.tensor(x, dtype=torch.long), torch.tensor(y, dtype=torch.long)
+
+    def shuffle(self):
+        random.shuffle(self.data)
 
     def get_metadata(self):
         return {
@@ -307,7 +310,7 @@ class ComparisonsDataset(Dataset):
             'std': int(np.std(seq_length_stats)),
         }
 
-        random.shuffle(self.data)
+        self.shuffle()
 
     def __len__(self):
         return len(self.data)
@@ -317,10 +320,74 @@ class ComparisonsDataset(Dataset):
 
         return x, ys
 
+    def shuffle(self):
+        random.shuffle(self.data)
+
     def get_metadata(self):
         return {
             'num_samples': len(self),
             'completion_stats': self.completion_stats,
+            'sequence_length_stats': self.seq_length_stats,
+            'data_sources': self.data_sources,
+        }
+
+
+class PromptOnlyDataset(Dataset):
+    def __init__(self, data_sources: Iterable[str], max_seq_len: int = 2048, seed: int = 1) -> None:
+        """
+        Args:
+            data_sources: a list of string path to where to load the dataset.
+            max_seq_len: prompt_tokens + completion_tokens length greater than this will be discarded.
+        """
+
+        assert len(data_sources) > 0
+        assert max_seq_len > 128
+
+        self.data_sources = data_sources
+        self.max_seq_len = max_seq_len
+
+        self.random_state = np.random.RandomState(seed)
+
+        self.data = []
+
+        seq_length_stats = []  # track statistics
+
+        # Load datasets
+        for source in data_sources:
+            samples = pickle.load(open(source, 'rb'))
+            for sample in samples:
+                x = sample['prompt_tokens']
+                seq_length = len(x)
+                if seq_length <= self.max_seq_len:
+                    self.data.append(x)
+                    seq_length_stats.append(seq_length)
+
+        self.total_num_tokens = sum(seq_length_stats)
+        self.seq_length_stats = {
+            'min': int(np.min(seq_length_stats)),
+            'max': int(np.max(seq_length_stats)),
+            'mean': int(np.mean(seq_length_stats)),
+            'std': int(np.std(seq_length_stats)),
+        }
+
+        self.num_samples = len(self.data)
+        self.shuffle()
+
+    def __len__(self):
+        return len(self.data)
+
+    def shuffle(self):
+        random.shuffle(self.data)
+
+    def sample(self):
+        idx = self.random_state.randint(low=0, high=self.num_samples)
+        x = self.data[idx]
+        return x
+
+    def get_metadata(self):
+        return {
+            'num_samples': len(self),
+            'num_tokens': self.total_num_tokens,
             'sequence_length_stats': self.seq_length_stats,
             'data_sources': self.data_sources,
         }

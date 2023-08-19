@@ -92,5 +92,5 @@ if __name__ == '__main__':
     main(
         # ckpt_dir="./meta_checkpoints/llama-2/llama-2-7b-chat",  # Meta fine-tuned chat model
         ckpt_dir='./checkpoints/7b-finetune',  # our fine-tuned chat model
-        tokenizer_path='./checkpoints/llama-2/tokenizer.model',
+        tokenizer_path='./meta_checkpoints/llama-2/tokenizer.model',
     )

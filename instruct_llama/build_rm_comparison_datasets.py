@@ -50,7 +50,7 @@ DEFAULT_DIALOG = [DEFAULT_SYSTEM_PROMPT]
 
 # ----------------------------------- helper functions -----------------------------------
 
-SKIP_KEY_WORDS = ['photo', 'video', 'movie', 'youtube', 'YouTube']
+KEYWORDS_TO_SKIP = ['photo', 'video', 'movie', 'youtube', 'YouTube']
 
 
 Answers = List[Mapping[Text, Any]]
@@ -128,7 +128,7 @@ def _remove_answers_with_zero_score(answers: Answers) -> Answers:
 
 
 def _question_contains_skip_words(question: str) -> bool:
-    if any(_string_found(question, k) for k in SKIP_KEY_WORDS):
+    if any(_string_found(question, k) for k in KEYWORDS_TO_SKIP):
         return True
     return False
 
@@ -204,7 +204,7 @@ def _process_single_stackexchange_file(
         if len(answers) < min_completions:
             continue
 
-        # build ptompt tokens once
+        # build prompt tokens once
         dialog = DEFAULT_DIALOG + [
             {'role': 'user', 'content': question},
         ]
@@ -276,12 +276,7 @@ def process_stackexchange_dataset(
     if metadata is None:
         metadata = {}
 
-    # the source files are p
     working_files = find_certain_files_under_dir(src_dir, '.parquet')
-
-    # TODO delete this line
-    random.shuffle(working_files)
-    working_files = working_files
 
     num_files = len(working_files)
 

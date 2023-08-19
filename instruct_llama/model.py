@@ -3,7 +3,7 @@
 
 import math
 from dataclasses import dataclass
-from typing import Any, Optional, Tuple
+from typing import Any, Optional, Tuple, Iterable
 from typing_extensions import Self
 import numpy as np
 import torch
@@ -102,6 +102,8 @@ def apply_rotary_emb(
 class Attention(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
+        self.max_batch_size = args.max_batch_size
+        self.max_seq_len = args.max_seq_len
         self.n_heads = args.n_heads
         self.head_dim = args.dim // args.n_heads
 
@@ -111,23 +113,26 @@ class Attention(nn.Module):
         self.wo = nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
 
         self.use_cache = args.use_cache
+
+        self.cache_k = None
+        self.cache_v = None
         if self.use_cache:
             self.cache_k = torch.zeros(
                 (
-                    args.max_batch_size,
-                    args.max_seq_len,
+                    self.max_batch_size,
+                    self.max_seq_len,
                     self.n_heads,
                     self.head_dim,
                 )
-            ).cuda()
+            )
             self.cache_v = torch.zeros(
                 (
-                    args.max_batch_size,
-                    args.max_seq_len,
+                    self.max_batch_size,
+                    self.max_seq_len,
                     self.n_heads,
                     self.head_dim,
                 )
-            ).cuda()
+            )
 
         # regularization
         self.attn_dropout = nn.Dropout(args.attn_dropout) if args.attn_dropout > 0 else nn.Identity()
@@ -178,6 +183,40 @@ class Attention(nn.Module):
         output = self.wo(output)
         output = self.resid_dropout(output)
         return output
+
+    def disable_cache(self):
+        """Set use cache to False, and remove the k, v cache tensors if already exists."""
+
+        self.use_cache = False
+
+        if self.cache_k is not None:
+            self.cache_k = None
+        if self.cache_v is not None:
+            self.cache_v = None
+
+    def enable_cache(self):
+        """Set use cache to True, and create the k, v cache tensors if not already exists."""
+
+        self.use_cache = True
+
+        if self.cache_k is None:
+            self.cache_k = torch.zeros(
+                (
+                    self.max_batch_size,
+                    self.max_seq_len,
+                    self.n_heads,
+                    self.head_dim,
+                )
+            )
+        if self.cache_v is None:
+            self.cache_v = torch.zeros(
+                (
+                    self.max_batch_size,
+                    self.max_seq_len,
+                    self.n_heads,
+                    self.head_dim,
+                )
+            )
 
 
 class FeedForward(nn.Module):
@@ -248,7 +287,7 @@ class Transformer(nn.Module):
         self.token_embeddings = nn.Embedding(params.vocab_size, params.dim)
         self.embeddings_dropout = nn.Dropout(params.embed_dropout) if params.embed_dropout > 0 else nn.Identity()
 
-        self.layers = torch.nn.ModuleList()
+        self.layers: Iterable[TransformerBlock] = torch.nn.ModuleList()
         for layer_id in range(params.n_layers):
             self.layers.append(TransformerBlock(layer_id, params))
 
@@ -260,11 +299,25 @@ class Transformer(nn.Module):
         elif self.params.head_type == 'scalar_head':
             print('Creating LLaMA-2 model with scalar head...')
             self.scalar_head = nn.Linear(params.dim, 1, bias=True)
+        elif self.params.head_type == 'lm_and_scalar_heads':
+            print('Creating LLaMA-2 model with LM and scalar heads...')
+            self.lm_head = nn.Linear(params.dim, params.vocab_size, bias=False)
+            self.scalar_head = nn.Linear(params.dim, 1, bias=True)
 
         self.freqs_cis = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.max_seq_len * 2)
 
+    def disable_cache(self):
+        """When train the policy with RL, we want to use cache to speed up acting (generating training samples),
+        but use no cache when do learning. So we have disable_cache and enable_cache"""
+        for layer in self.layers:
+            layer.attention.disable_cache()
+
+    def enable_cache(self):
+        for layer in self.layers:
+            layer.attention.enable_cache()
+
     def init_scalar_head_weights(self):
-        if self.params.head_type == 'scalar_head':
+        if self.params.head_type == 'scalar_head' or self.params.head_type == 'lm_and_scalar_heads':
             head = self.scalar_head
             print('Initialize weights for model scalar head...')
 
@@ -295,6 +348,10 @@ class Transformer(nn.Module):
             output = self.lm_head(h).float()
         elif self.params.head_type == 'scalar_head':
             output = self.scalar_head(h).float()
+        elif self.params.head_type == 'lm_and_scalar_heads':
+            output = {}
+            output['logits'] = self.lm_head(h).float()
+            output['values'] = self.scalar_head(h).float()
         else:
             output = h
 

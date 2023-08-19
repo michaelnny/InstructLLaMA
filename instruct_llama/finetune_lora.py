@@ -426,7 +426,7 @@ def main():
 
             del model_state
 
-    mark_only_lora_as_trainable(model, bias=cfg.train_bias, head=cfg.train_head)
+    mark_only_lora_as_trainable(model, train_bias=cfg.train_bias, train_head=cfg.train_head)
 
     # try to convert the model to half precision, otherwise we can't even move the 7B model to a single RTX 3090
     train_dtype = torch.float32
@@ -440,9 +440,9 @@ def main():
     else:
         logger.warning('Training in float32 mode, make sure you have enough GPU RAM')
 
-    # BUG in pytorch 2.0.1, as we found out using torch.autocast will increase GPU RAM usage, and cause CUDA OUT OF MEMORY error
-    # when run the training script on a single RTX 3090
-    # so here we manually set the model to half precision
+    # BUG in pytorch 2.0.1, as we found out using torch.autocast will increase GPU RAM usage,
+    # and cause CUDA OUT OF MEMORY error when run the training script on a single RTX 3090
+    # so we manually convert the model to half precision before moving it to GPU
 
     # mp_ctx = torch.cuda.amp.autocast(dtype=train_dtype, cache_enabled=False)
 
@@ -479,7 +479,7 @@ def main():
 
     # --------------- Start Training ---------------
 
-    logger.info(f'\nStarting to run {cfg.max_train_iters} training iterations...')
+    logger.info(f'Starting to run {cfg.max_train_iters} training iterations...')
 
     torch_profiler = None
     # Careful as the logs will grow very fast
@@ -535,7 +535,7 @@ def main():
         # checkpointing
         if cfg.ckpt_interval > 0 and iter % cfg.ckpt_interval == 0 or iter == cfg.max_train_iters:
             # save model state
-            checkpoint = lora_state_dict(model, bias=cfg.train_bias, head=cfg.train_head)
+            checkpoint = lora_state_dict(model, train_bias=cfg.train_bias, train_head=cfg.train_head)
             torch.save(checkpoint, os.path.join(cfg.ckpt_dir, f'lora_{cfg.model_type}-iter-{iter}.pth'))
 
         # validation steps

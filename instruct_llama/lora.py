@@ -466,82 +466,80 @@ class MergedLinear(nn.Linear, LoRALayer):
             return result
 
 
-def mark_only_lora_as_trainable(model: nn.Module, bias: str = 'none', head: str = 'none') -> None:
+def mark_only_lora_as_trainable(model: nn.Module, train_bias: str = 'none', train_head: bool = False) -> None:
     """Freeze all modules except LoRA's and depending on 'bias' value unfreezes bias weights.
 
     Args:
         model: model with LoRA layers
-        bias:
+        train_bias:
             ``"none"``: all bias weights will be frozen,
             ``"lora_only"``: only bias weight for LoRA layers will be unfrozen,
             ``"all"``: all bias weights will be unfrozen.
-        head:
-            ``"none"``: all head weights will be frozen,
-            ``"lm_head"``: head weight for lm_head layer will be unfrozen,
-            ``"scalar_head"``: head weight for scalar_head layer will be unfrozen.
+        train_head: if True, head (lm_head, or scalar_head) weights will be unfrozen.
 
     Raises:
-        NotImplementedError: if `bias` not in ["none", "lora_only", "all"], or `head` not in ["none", "lm_head", "scalar_head"]
+        NotImplementedError: if `bias` not in ['none', 'lora_only', 'all']
     """
 
-    if bias not in ['none', 'lora_only', 'all']:
-        raise NotImplementedError
-    if head not in ['none', 'lm_head', 'scalar_head']:
+    if train_bias not in ['none', 'lora_only', 'all']:
         raise NotImplementedError
 
     # freeze all layers except LoRA's, or output head layer
     for n, p in model.named_parameters():
         if 'lora_' not in n:
-            if head != 'none' and head in n:
+            if train_head and ('lm_head' in n or 'scalar_head' in n):
                 p.requires_grad = True
             else:
                 p.requires_grad = False
 
     # depending on the `bias` value unfreeze bias weights
-    if bias == 'none':
+    if train_bias == 'none':
         return
-    elif bias == 'all':
+    elif train_bias == 'all':
         for n, p in model.named_parameters():
             if 'bias' in n:
                 p.requires_grad = True
-    elif bias == 'lora_only':
+    elif train_bias == 'lora_only':
         for m in model.modules():
             if isinstance(m, LoRALayer) and hasattr(m, 'bias') and m.bias is not None:
                 m.bias.requires_grad = True
 
 
-def lora_state_dict(model: nn.Module, bias: str = 'none', head: str = 'none') -> Dict[str, torch.Tensor]:
+def lora_state_dict(model: nn.Module, train_bias: str = 'none', train_head: bool = False) -> Dict[str, torch.Tensor]:
     """Return state_dict with weights of LoRA's A and B matrices and with biases depending on the `bias` value.
 
     Args:
         model: model with LoRA layers
-        bias:
+        train_bias:
             ``"none"``: state dict will not store bias weights,
             ``"lora_only"``: state dict will store bias weights only from LoRA layers,
             ``"all"``: state dict will store all bias weights.
-        head:
-            ``"none"``: state dict will not store head weights,
-            ``"lm_head"``: state dict will store lm_head layer weights,
-            ``"scalar_head"``: state dict will store scalar_head layer weights.
+        train_head: if True, head (lm_head, or scalar_head) weights will be unfrozen.
 
     Returns:
         Weights and biases of LoRA layers
 
     Raises:
-        NotImplementedError: if `bias` not in ["none", "lora_only", "all"], or `head` not in ["none", "lm_head", "scalar_head"]
+        NotImplementedError: if `bias` not in ['none', 'lora_only', 'all']
     """
 
-    if bias not in ['none', 'lora_only', 'all']:
-        raise NotImplementedError
-    if head not in ['none', 'lm_head', 'scalar_head']:
+    if train_bias not in ['none', 'lora_only', 'all']:
         raise NotImplementedError
 
     my_state_dict = model.state_dict()
-    if bias == 'none':
-        return {k: my_state_dict[k] for k in my_state_dict if 'lora_' in k or (head != 'none' and head in k)}
-    elif bias == 'all':
-        return {k: my_state_dict[k] for k in my_state_dict if 'lora_' in k or 'bias' in k or (head != 'none' and head in k)}
-    elif bias == 'lora_only':
+    if train_bias == 'none':
+        return {
+            k: my_state_dict[k]
+            for k in my_state_dict
+            if 'lora_' in k or (train_head and ('lm_head' in k or 'scalar_head' in k))
+        }
+    elif train_bias == 'all':
+        return {
+            k: my_state_dict[k]
+            for k in my_state_dict
+            if 'lora_' in k or 'bias' in k or (train_head and ('lm_head' in k or 'scalar_head' in k))
+        }
+    elif train_bias == 'lora_only':
         to_return = {}
         for k in my_state_dict:
             if 'lora_' in k:
@@ -549,7 +547,7 @@ def lora_state_dict(model: nn.Module, bias: str = 'none', head: str = 'none') ->
                 bias_name = k.split('lora_')[0] + 'bias'
                 if bias_name in my_state_dict:
                     to_return[bias_name] = my_state_dict[bias_name]
-            elif head != 'none' and head in k:
+            elif train_head and ('lm_head' in k or 'scalar_head' in k):
                 to_return[k] = my_state_dict[k]
 
         return to_return
@@ -580,6 +578,8 @@ class Attention(llama.Attention):
         # Skip the parent class __init__ altogether and replace it to avoid
         # useless allocations
         nn.Module.__init__(self)
+        self.max_batch_size = args.max_batch_size
+        self.max_seq_len = args.max_seq_len
         self.n_heads = args.n_heads
         self.head_dim = args.dim // args.n_heads
 
@@ -610,7 +610,11 @@ class Attention(llama.Attention):
             bias=False,
         )
 
-        self.use_cache = False
+        self.use_cache = args.use_cache
+
+        self.cache_k = None
+        self.cache_v = None
+
         # regularization
         self.attn_dropout = nn.Dropout(args.attn_dropout) if args.attn_dropout > 0 else nn.Identity()
         self.resid_dropout = nn.Dropout(args.resid_dropout) if args.resid_dropout > 0 else nn.Identity()

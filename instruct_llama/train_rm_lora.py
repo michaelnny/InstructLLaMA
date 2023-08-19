@@ -1,4 +1,4 @@
-"""Train reward model (RM) using LoRA, starting from our fine-tuned model."""
+"""Train reward model (RM) using comparison datasets, starting from our fine-tuned model checkpoint, and with LoRA parameter efficient method."""
 import os
 import itertools
 import functools
@@ -15,7 +15,6 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 # import torch.multiprocessing
-
 # torch.multiprocessing.set_sharing_strategy('file_system')
 
 import torch.distributed as dist
@@ -39,8 +38,6 @@ from instruct_llama.configs.train_rm_lora import config as cfg
 
 from instruct_llama.utils import (
     CosineDecayWithWarmupLRScheduler,
-    Memory_Maximizer,
-    format_to_gb,
     create_logger,
 )
 
@@ -131,7 +128,9 @@ def create_optimizer(
 
 def compute_rm_comparison_loss(rewards: torch.Tensor) -> torch.Tensor:
     """Compute RM comparison loss.
-    Note we assume the rewards are for the ordered completions for a given prompt, where the best completion is the first, and worst completion is the last.
+
+    Note we assume the rewards are for the ordered completions for a given prompt,
+    where the best completion is the first, and worst completion is the last.
     """
     assert len(rewards.shape) == 1  # [num_completions]
 
@@ -170,7 +169,9 @@ def compute_rm_comparison_loss(rewards: torch.Tensor) -> torch.Tensor:
 @torch.no_grad()
 def compute_metrics(rewards: torch.Tensor) -> Tuple[int, int]:
     """Compute number of accurate predictions in terms of reward values.
-    Note we assume the rewards are for the ordered completions for a given prompt, where the best completion is the first, and worst completion is the last.
+
+    Note we assume the rewards are for the ordered completions for a given prompt,
+    where the best completion is the first, and worst completion is the last.
     """
     assert len(rewards.shape) == 1  # [num_completions]
 
@@ -389,8 +390,8 @@ def main():
     assert cfg.gradient_accum_steps >= 1
     assert cfg.log_interval >= 10
 
-    if not os.path.exists(cfg.pretrain_ckpt_file):
-        raise ValueError(f'Invalid pretrained checkpoint "{cfg.pretrain_ckpt_file}", aborting...')
+    if not os.path.exists(cfg.sft_ckpt_file):
+        raise ValueError(f'Invalid SFT model checkpoint "{cfg.sft_ckpt_file}", aborting...')
 
     local_rank = int(os.environ['LOCAL_RANK'])
     rank = int(os.environ['RANK'])
@@ -450,8 +451,6 @@ def main():
     torch.cuda.set_device(local_rank)
     clear_gpu_cache(local_rank)
 
-    assert cfg.train_head == 'scalar_head'
-
     with lora(r=cfg.lora_r, alpha=cfg.lora_alpha, dropout=cfg.lora_dropout, enabled=True):
         model_args = ModelArgs.from_model_type(cfg.model_type)
         model_args.vocab_size = tokenizer.vocab_size
@@ -465,18 +464,18 @@ def main():
 
         model = Transformer(model_args)
 
-        # Load model checkpoint using strict=False,
+        # Load SFT model checkpoint using strict=False,
         # because there's not scalar head weights in the checkpoint state
-        if os.path.exists(cfg.pretrain_ckpt_file):
-            logger.info(f'Loading pretrained checkpoint {cfg.pretrain_ckpt_file}...')
-            model_state = torch.load(cfg.pretrain_ckpt_file)
+        if os.path.exists(cfg.sft_ckpt_file):
+            logger.info(f'Loading SFT checkpoint {cfg.sft_ckpt_file}...')
+            model_state = torch.load(cfg.sft_ckpt_file)
             model.load_state_dict(model_state, strict=False)
 
             del model_state
 
     model.init_scalar_head_weights()
 
-    mark_only_lora_as_trainable(model, bias=cfg.train_bias, head=cfg.train_head)
+    mark_only_lora_as_trainable(model, train_bias=cfg.train_bias, train_head=cfg.train_head)
 
     # try to convert the model to half precision, otherwise we can't even move the 7B model to a single RTX 3090
     bf16_ready = torch.version.cuda and torch.cuda.is_bf16_supported()
@@ -493,9 +492,9 @@ def main():
     else:
         logger.warning('Training in float32 mode, make sure you have enough GPU RAM')
 
-    # BUG in pytorch 2.0.1, as we found out using torch.autocast will increase GPU RAM usage, and cause CUDA OUT OF MEMORY error
-    # when run the training script on a single RTX 3090
-    # so here we manually set the model to half precision
+    # BUG in pytorch 2.0.1, as we found out using torch.autocast will increase GPU RAM usage,
+    # and cause CUDA OUT OF MEMORY error when run the training script on a single RTX 3090
+    # so we manually convert the model to half precision before moving it to GPU
 
     # mp_ctx = torch.cuda.amp.autocast(dtype=train_dtype, cache_enabled=False)
 
@@ -532,7 +531,7 @@ def main():
 
     # --------------- Start Training ---------------
 
-    logger.info(f'\nStarting to run {cfg.max_train_iters} training iterations...')
+    logger.info(f'Starting to run {cfg.max_train_iters} training iterations...')
 
     torch_profiler = None
     # Careful as the logs will grow very fast
@@ -586,7 +585,7 @@ def main():
         # checkpointing
         if cfg.ckpt_interval > 0 and iter % cfg.ckpt_interval == 0 or iter == cfg.max_train_iters:
             # save model state
-            checkpoint = lora_state_dict(model, bias=cfg.train_bias, head=cfg.train_head)
+            checkpoint = lora_state_dict(model, train_bias=cfg.train_bias, train_head=cfg.train_head)
 
             torch.save(checkpoint, os.path.join(cfg.ckpt_dir, f'lora_{cfg.model_type}-iter-{iter}.pth'))
 
