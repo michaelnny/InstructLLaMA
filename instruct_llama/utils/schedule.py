@@ -5,8 +5,9 @@ import torch
 class LinearWarmupLRScheduler(torch.optim.lr_scheduler.LRScheduler):
     """Follows the LoRA paper"""
 
-    def __init__(self, optimizer, lr, warmup_steps, last_epoch=-1, verbose=False) -> None:
-        self.lr = lr
+    def __init__(self, optimizer, init_lr, max_lr, warmup_steps, last_epoch=-1, verbose=False) -> None:
+        self.init_lr = init_lr
+        self.max_lr = max_lr
         self.warmup_steps = warmup_steps
 
         super().__init__(optimizer, last_epoch, verbose)
@@ -14,9 +15,11 @@ class LinearWarmupLRScheduler(torch.optim.lr_scheduler.LRScheduler):
     def get_lr(self):
         if self.last_epoch <= self.warmup_steps:
             # Warm-up phase
-            return [self.lr * self.last_epoch / self.warmup_steps] * len(self.optimizer.param_groups)
+            return [self.init_lr + (self.max_lr - self.init_lr) * self.last_epoch / self.warmup_steps] * len(
+                self.optimizer.param_groups
+            )
         else:
-            return [self.lr] * len(self.optimizer.param_groups)
+            return [self.max_lr] * len(self.optimizer.param_groups)
 
 
 class CosineDecayWithWarmupLRScheduler(torch.optim.lr_scheduler.LRScheduler):

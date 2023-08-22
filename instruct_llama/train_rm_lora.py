@@ -150,7 +150,6 @@ def compute_rm_comparison_loss(rewards: torch.Tensor) -> torch.Tensor:
         r_worser = rewards[i + 1 :]
         r_better = rewards[i].repeat(len(r_worser))
         assert r_better.shape == r_worser.shape
-        assert len(r_better) == len(r_worser)
 
         l_i = -torch.log(torch.sigmoid(r_better - r_worser)).sum()
         if loss is None:

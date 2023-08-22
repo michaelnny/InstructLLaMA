@@ -190,8 +190,10 @@ class Attention(nn.Module):
         self.use_cache = False
 
         if self.cache_k is not None:
+            del self.cache_k
             self.cache_k = None
         if self.cache_v is not None:
+            del self.cache_v
             self.cache_v = None
 
     def enable_cache(self):

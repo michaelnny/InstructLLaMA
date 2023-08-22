@@ -1,9 +1,10 @@
-from typing import Iterable
+from typing import Iterable, List
 import os
 import random
 import math
 import itertools
 import pickle
+import json
 import numpy as np
 import torch
 from torch.utils.data import Dataset, IterableDataset, DataLoader
@@ -29,14 +30,16 @@ class DataSource:
         assert len(self.name) > 0
         assert 0 <= self.weights <= 1
         assert os.path.exists(self.data_file) and self.data_file.endswith('.npy')
-        assert os.path.exists(self.metadata_file) and self.metadata_file.endswith('.pkl')
+        assert os.path.exists(self.metadata_file) and self.metadata_file.endswith('.json')
 
     def update_weights(self, v) -> None:
         assert 0 <= v <= 1
         self.weights = v
 
     def load_metadata(self) -> None:
-        metadata = pickle.load(open(self.metadata_file, 'rb'))
+        with open(self.metadata_file, 'r') as file:
+            metadata = json.load(file)
+
         assert 'num_tokens' in metadata and 'data_type' in metadata
         assert metadata['data_type'] in ['uint16', 'unit32']
 
@@ -63,7 +66,6 @@ class DataSource:
             'weights': self.weights,
             'num_tokens': self.num_tokens,
             'vocab_size': self.metadata['vocab_size'],
-            'tokenizer': self.metadata['tokenizer'],
             'data_type': self.metadata['data_type'],
             'data_file': self.data_file,
             'metadata_file': self.metadata_file,
@@ -103,7 +105,7 @@ class BlendedDataset(IterableDataset):
 
         random.seed(seed)
 
-        self.data_sources = data_sources
+        self.data_sources: Iterable[DataSource] = data_sources
 
         self.rank = rank
         self.world_size = world_size
@@ -170,8 +172,8 @@ class BlendedDataset(IterableDataset):
             assert end <= num_tokens - 1
 
             # here the high is exclusive
-            x = torch.from_numpy(data[start:end]).to(dtype=torch.long)
-            y = torch.from_numpy(data[start + 1 : end + 1]).to(dtype=torch.long)
+            x = torch.from_numpy((data[start:end]).astype(np.int32)).to(dtype=torch.long)
+            y = torch.from_numpy((data[start + 1 : end + 1]).astype(np.int32)).to(dtype=torch.long)
 
             yield x, y
 
@@ -333,7 +335,7 @@ class ComparisonsDataset(Dataset):
 
 
 class PromptOnlyDataset(Dataset):
-    def __init__(self, data_sources: Iterable[str], max_seq_len: int = 2048, seed: int = 1) -> None:
+    def __init__(self, data_sources: Iterable[str], max_seq_len: int = 2048, max_samples: int = 50000, seed: int = 1) -> None:
         """
         Args:
             data_sources: a list of string path to where to load the dataset.
@@ -345,6 +347,7 @@ class PromptOnlyDataset(Dataset):
 
         self.data_sources = data_sources
         self.max_seq_len = max_seq_len
+        self.max_samples = max_samples
 
         self.random_state = np.random.RandomState(seed)
 
@@ -370,7 +373,12 @@ class PromptOnlyDataset(Dataset):
             'std': int(np.std(seq_length_stats)),
         }
 
+        if len(self.data) > self.max_samples:
+            self.shuffle()
+            self.data = self.data[: self.max_samples]
+
         self.num_samples = len(self.data)
+
         self.shuffle()
 
     def __len__(self):
@@ -379,10 +387,10 @@ class PromptOnlyDataset(Dataset):
     def shuffle(self):
         random.shuffle(self.data)
 
-    def sample(self):
-        idx = self.random_state.randint(low=0, high=self.num_samples)
-        x = self.data[idx]
-        return x
+    def sample(self, size: int = 1) -> List[List[int]]:
+        indices = self.random_state.randint(low=0, high=self.num_samples, size=size)
+
+        return [self.data[i] for i in indices]
 
     def get_metadata(self):
         return {

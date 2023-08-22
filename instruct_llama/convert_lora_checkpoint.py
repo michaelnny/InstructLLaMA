@@ -113,10 +113,18 @@ if __name__ == '__main__':
     #     save_path='./checkpoints/7b-finetune/iter-2000-merged.pth',
     # )
 
-    # RM model
+    # # RM model
+    # merge_lora_checkpoint(
+    #     model_type='7B',
+    #     lora_ckpt_path='./checkpoints/train_rm_lora/lora_7B-iter-3200.pth',
+    #     pretrained_ckpt_dir='./checkpoints/7b-finetune/',
+    #     save_path='./checkpoints/7b-rm/iter-3200-merged.pth',
+    # )
+
+    # PPO model
     merge_lora_checkpoint(
         model_type='7B',
-        lora_ckpt_path='./checkpoints/train_rm_lora/lora_7B-iter-3200.pth',
+        lora_ckpt_path='./checkpoints/train_ppo_lora/lora_7B-train-200.pth',
         pretrained_ckpt_dir='./checkpoints/7b-finetune/',
-        save_path='./checkpoints/7b-rm/iter-3200-merged.pth',
+        save_path='./checkpoints/7b-ppo/train-step-200-merged.pth',
     )

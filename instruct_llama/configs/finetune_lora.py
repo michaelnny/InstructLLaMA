@@ -9,6 +9,7 @@ class config:
     # model type definition, the details (number of layers, heads etc.) are defined in model.py
     model_type: str = '7B'  # 7B, 13B, 70B
     head_type: str = 'lm_head'
+    max_seq_len: int = 450  # use smaller sequence length to save GPU RAM
 
     pretrain_ckpt_file: str = './meta_checkpoints/llama-2/llama-2-7b/consolidated.pth'  # load pretrained checkpoint
     tokenizer_file: str = './meta_checkpoints/llama-2/tokenizer.model'  # load tokenizer model
@@ -27,8 +28,6 @@ class config:
         './datasets/commonsense_dialogues/validation.pkl',
     )
     dataloader_workers: int = 1
-
-    max_seq_len: int = 450  # use smaller sequence length to save GPU RAM
 
     # if true, always pad the sequence to max_seq_len instead of current maximum length in the batch
     # this is helpful when starting out and try to found the hyperparameter (e.g batch size, maximum sequence length)

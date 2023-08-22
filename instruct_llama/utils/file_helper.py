@@ -6,7 +6,7 @@ from typing import Iterable, List, Tuple, Mapping, Text, Any
 
 def find_certain_files_under_dir(root_dir: str, file_type: str = '.txt') -> Iterable[str]:
     """Given a root folder, find all files in this folder and it's sub folders that matching the given file type."""
-    assert file_type in ['.txt', '.jsonl', '.parquet']
+    assert file_type in ['.txt', '.json', '.jsonl', '.parquet', '.zst']
 
     files = []
     if os.path.exists(root_dir):

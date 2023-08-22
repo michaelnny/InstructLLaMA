@@ -9,6 +9,7 @@ class config:
     # model type definition, the details (number of layers, heads etc.) are defined in model.py
     model_type: str = '7B'  # 7B, 13B, 70B
     head_type: str = 'scalar_head'  # reward model requires scalar head
+    max_seq_len: int = 280  # RM model is special because we need to maintain two graphs when computing loss, so the sequence length is much shorter
 
     sft_ckpt_file: str = './checkpoints/7b-finetune/iter-2000-merged.pth'  # load fine-tuned checkpoint
     tokenizer_file: str = './meta_checkpoints/llama-2/tokenizer.model'  # load tokenizer model
@@ -18,7 +19,6 @@ class config:
     val_datasources: Tuple[str] = ('./datasets/stackexchange_dataset/validation.pkl',)
     dataloader_workers: int = 1
 
-    max_seq_len: int = 280  # RM model is special because we need to maintain two graphs when computing loss, so the sequence length is much shorter
     # minimum number of completions per sample, if completions lesser than this, the entire sample is discarded
     min_completions: int = 2
     # maximum number of completions per sample, if completions more than this, only keep the best N samples, set this to a lower value if don't have enough GPU RAM

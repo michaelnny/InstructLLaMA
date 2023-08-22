@@ -394,7 +394,7 @@ def process_deepmind_math_dataset(
 
     # Create a ProcessPoolExecutor with maximum N processes
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        futures = [executor.submit(process_txt_file_func, file) for i, file in enumerate(working_files)]
+        futures = [executor.submit(process_txt_file_func, file) for file in working_files]
 
         for future in as_completed(futures):
             pairs = future.result()
