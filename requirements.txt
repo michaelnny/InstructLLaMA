@@ -1,0 +1,11 @@
+torch>=2.0.0
+sentencepiece # tokenizer
+tqdm
+numpy
+
+tensorboard
+torch_tb_profiler==0.4.1
+
+bitsandbytes
+
+zstandard  # prepare redpajama pretrain dataset
