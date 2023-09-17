@@ -150,7 +150,12 @@ class BlendedDataset(IterableDataset):
 
                 assert start_idx >= 0 and end_idx - start_idx > self.max_seq_len
 
-            self.shard_indices.append((start_idx, end_idx))
+            start_indices = [
+                i
+                for i in range(0, end_idx - self.max_seq_len, self.max_seq_len)
+                if i * self.max_seq_len + self.max_seq_len < end_idx
+            ]
+            self.shard_indices.append(start_indices)
 
     def generator(self):
         while True:
@@ -162,11 +167,8 @@ class BlendedDataset(IterableDataset):
 
             assert data is not None and num_tokens > self.max_seq_len
 
-            # Get shard start and end indices for the chosen data source
-            min_idx, max_idx = self.shard_indices[ds_idx]
-
-            start = random.randint(a=min_idx, b=max_idx - self.max_seq_len - 1)
-
+            # Get shard start indices for the chosen data source
+            start = random.choice(self.shard_indices[ds_idx])
             end = start + self.max_seq_len
 
             assert end <= num_tokens - 1
@@ -251,59 +253,50 @@ class FineTuneDataset(Dataset):
 
 
 class ComparisonsDataset(Dataset):
-    def __init__(
-        self, data_sources: Iterable[str], min_completions: int = 4, max_completions: int = 9, max_seq_len: int = 2048
-    ) -> None:
+    def __init__(self, data_sources: Iterable[str], max_seq_len: int = 2048) -> None:
         """
         Args:
             data_sources: a list of string path to where to load the dataset.
-            min_completions: minimum number of completions per sample, sample with lesser completions will be discarded.
-            max_completions: maximum number of completions per sample.
             max_seq_len: prompt_tokens + completion_tokens length greater than this will be discarded.
         """
         assert len(data_sources) > 0
         assert max_seq_len > 128
-
-        assert min_completions >= 2 and max_completions >= min_completions
 
         self.data_sources = data_sources
         self.max_seq_len = max_seq_len
 
         self.data = []
         # track some statistics
-        completion_stats = []
+        stats = []
         seq_length_stats = []
 
         # Load datasets
         for source in data_sources:
             samples = pickle.load(open(source, 'rb'))
             for sample in samples:
-                # here completions is a (descending) ordered list of completion tokens, with the best answer at the begining (index 0)
-                x, ys = sample['prompt_tokens'], sample['completions_tokens']
+                # here tokens_list is a (descending) ordered list of prompt + responses tokens, with the best answer at the beginning (index 0)
+                tokens_list = sample['tokens']
 
-                if len(x) > self.max_seq_len:
+                if len(tokens_list) < 2:
                     continue
 
                 # exclude those samples with length greater than max sequence length
-                ys = [y for y in ys if len(x) + len(y) <= self.max_seq_len]
+                tokens_list = [item for item in tokens_list if len(item) <= self.max_seq_len]
 
-                if len(ys) < min_completions:  # comparison requires at least 2 samples
+                if len(tokens_list) < 2:  # comparison requires at least 2 samples
                     continue
 
-                if len(ys) > max_completions:
-                    ys = ys[:max_completions]
+                stats.append(len(tokens_list))
 
-                completion_stats.append(len(ys))
+                seq_length_stats.extend([len(item) for item in tokens_list])
 
-                seq_length_stats.extend([len(x) + len(y) for y in ys])
+                self.data.append(tokens_list)
 
-                self.data.append((x, ys))
-
-        self.completion_stats = {
-            'min': int(np.min(completion_stats)),
-            'max': int(np.max(completion_stats)),
-            'mean': int(np.mean(completion_stats)),
-            'std': int(np.std(completion_stats)),
+        self.responses_stats = {
+            'min': int(np.min(stats)),
+            'max': int(np.max(stats)),
+            'mean': int(np.mean(stats)),
+            'std': int(np.std(stats)),
         }
         self.seq_length_stats = {
             'min': int(np.min(seq_length_stats)),
@@ -318,9 +311,9 @@ class ComparisonsDataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, idx):
-        x, ys = self.data[idx]
+        items = self.data[idx]
 
-        return x, ys
+        return items
 
     def shuffle(self):
         random.shuffle(self.data)
@@ -328,7 +321,7 @@ class ComparisonsDataset(Dataset):
     def get_metadata(self):
         return {
             'num_samples': len(self),
-            'completion_stats': self.completion_stats,
+            'responses_stats': self.responses_stats,
             'sequence_length_stats': self.seq_length_stats,
             'data_sources': self.data_sources,
         }
@@ -339,7 +332,8 @@ class PromptOnlyDataset(Dataset):
         """
         Args:
             data_sources: a list of string path to where to load the dataset.
-            max_seq_len: prompt_tokens + completion_tokens length greater than this will be discarded.
+            max_seq_len: prompt_tokens length greater than this will be discarded.
+            max_samples: maximum number of samples to include.
         """
 
         assert len(data_sources) > 0

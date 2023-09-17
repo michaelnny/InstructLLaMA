@@ -1,12 +1,11 @@
 torch>=2.0.0
-sentencepiece
-tqdm  # convert_checkpoint.py
-numpy  # train.py dataset memmap
+sentencepiece # tokenizer
+tqdm
+numpy
 
 tensorboard
 torch_tb_profiler==0.4.1
 
-bitsandbytes  # quantization.py
+bitsandbytes
 
-# datasets  # evaluate.py
-# zstandard  # prepare_redpajama.py
+zstandard  # prepare redpajama pretrain dataset

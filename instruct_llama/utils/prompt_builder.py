@@ -4,7 +4,15 @@ We rewrite the original code to make it easier to understand, we can also use th
 """
 from typing import Tuple, List, Mapping, Text, Literal, Optional, TypedDict
 
-from instruct_llama.tokenizer import Tokenizer
+# support running without installing as a package
+from pathlib import Path
+import sys
+
+wd = Path(__file__).parent.parent.resolve()
+sys.path.append(str(wd))
+
+
+from instruct_llama.utils.tokenizer import Tokenizer
 
 Role = Literal['system', 'user', 'assistant']
 

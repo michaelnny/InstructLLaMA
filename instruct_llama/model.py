@@ -13,6 +13,7 @@ from torch import nn
 
 # llama 2 models
 llama_configs = {
+    '1B': dict(n_layers=8, n_heads=8, dim=1024),  # for code testing only
     '7B': dict(n_layers=32, n_heads=32, dim=4096),
     '13B': dict(n_layers=40, n_heads=40, dim=5120),
     '70B': dict(n_layers=80, n_heads=64, dim=8192),
@@ -38,7 +39,7 @@ class ModelArgs:
     max_batch_size: int = 8
     max_seq_len: int = 2048
 
-    head_type: str = 'lm_head'  # lm_head, scalar_head, lm_and_scalar_heads
+    head_type: str = 'lm_head'  # 'lm_head', 'scalar_head'
     use_cache: bool = False  # should only use cache when do inference
 
     # used during training
@@ -47,7 +48,7 @@ class ModelArgs:
     resid_dropout: float = 0.0
 
     def __post_init__(self):
-        assert self.head_type in ('lm_head', 'scalar_head', 'lm_and_scalar_heads')
+        assert self.head_type in ('lm_head', 'scalar_head')
 
     @classmethod
     def from_model_type(cls, model_type: str) -> Self:
@@ -301,10 +302,6 @@ class Transformer(nn.Module):
         elif self.params.head_type == 'scalar_head':
             print('Creating LLaMA-2 model with scalar head...')
             self.scalar_head = nn.Linear(params.dim, 1, bias=True)
-        elif self.params.head_type == 'lm_and_scalar_heads':
-            print('Creating LLaMA-2 model with LM and scalar heads...')
-            self.lm_head = nn.Linear(params.dim, params.vocab_size, bias=False)
-            self.scalar_head = nn.Linear(params.dim, 1, bias=True)
 
         self.freqs_cis = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.max_seq_len * 2)
 
@@ -318,18 +315,7 @@ class Transformer(nn.Module):
         for layer in self.layers:
             layer.attention.enable_cache()
 
-    def init_scalar_head_weights(self):
-        if self.params.head_type == 'scalar_head' or self.params.head_type == 'lm_and_scalar_heads':
-            head = self.scalar_head
-            print('Initialize weights for model scalar head...')
-
-            init_std = 1.0 / np.sqrt(self.params.dim + 1)
-            torch.nn.init.normal_(head.weight, std=init_std)
-            torch.nn.init.zeros_(head.bias)
-        else:
-            print('Nothing to do')
-
-    def forward(self, tokens: torch.Tensor, start_pos: int = 0) -> torch.Tensor:
+    def forward(self, tokens: torch.Tensor, start_pos: Optional[int] = 0) -> torch.Tensor:
         _bsz, seqlen = tokens.shape
         h = self.token_embeddings(tokens)
         h = self.embeddings_dropout(h)
@@ -350,14 +336,26 @@ class Transformer(nn.Module):
             output = self.lm_head(h).float()
         elif self.params.head_type == 'scalar_head':
             output = self.scalar_head(h).float()
-        elif self.params.head_type == 'lm_and_scalar_heads':
-            output = {}
-            output['logits'] = self.lm_head(h).float()
-            output['values'] = self.scalar_head(h).float()
         else:
             output = h
 
         return output
+
+
+class RewardModel(Transformer):
+    def __init__(self, params: ModelArgs):
+        # for to scalar head type
+        setattr(params, 'head_type', 'scalar_head')
+        # Call the constructor of the parent class (Transformer)
+        super().__init__(params)
+
+    def init_head_weights(self):
+        head = self.scalar_head
+        print('Initialize weights for scalar head...')
+
+        init_std = 1.0 / np.sqrt(self.params.dim + 1)
+        torch.nn.init.normal_(head.weight, std=init_std)
+        torch.nn.init.zeros_(head.bias)
 
 
 if __name__ == '__main__':
