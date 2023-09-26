@@ -548,7 +548,7 @@ def main():
 
     model.train()
 
-    for iter in range(1, cfg.max_train_iters + 1):
+    for i in range(1, cfg.max_train_iters + 1):
         train_stats = run_single_train_step(
             model=model,
             rank=rank,
@@ -559,7 +559,7 @@ def main():
             scheduler=scheduler,
             scaler=scaler,
             reward_stats=reward_stats,
-            return_stats=iter == 1 or iter % cfg.log_interval == 0 or iter == cfg.max_train_iters,
+            return_stats=i == 1 or i % cfg.log_interval == 0 or i == cfg.max_train_iters,
         )
 
         if inner_pbar is not None:
@@ -571,15 +571,15 @@ def main():
         # logging
         if train_stats is not None and rank == 0:
             logger(
-                f'Training iteration {iter}: train loss: {train_stats["loss"]:.4f}, train accuracy: {train_stats["accuracy"]:.2f}%, learning rate: {train_stats["learning_rate"]:.10f}'
+                f'Training iteration {i}: train loss: {train_stats["loss"]:.4f}, train accuracy: {train_stats["accuracy"]:.2f}%, learning rate: {train_stats["learning_rate"]:.10f}'
             )
 
             if tb_writer is not None:
                 for k, v in train_stats.items():
-                    tb_writer.add_scalar(f'train/{k}', v, iter)
+                    tb_writer.add_scalar(f'train/{k}', v, i)
 
         # validation steps
-        if iter % cfg.val_interval == 0 or iter == cfg.max_train_iters:
+        if i % cfg.val_interval == 0 or i == cfg.max_train_iters:
             val_stats = run_validation_steps(
                 model=model,
                 rank=rank,
@@ -591,12 +591,12 @@ def main():
 
             if rank == 0:
                 logger(
-                    f'Training iteration {iter}: validation loss: {val_stats["loss"]:.4f}, validation accuracy: {val_stats["accuracy"]:.2f}%'
+                    f'Training iteration {i}: validation loss: {val_stats["loss"]:.4f}, validation accuracy: {val_stats["accuracy"]:.2f}%'
                 )
 
                 if tb_writer is not None:
                     for k, v in val_stats.items():
-                        tb_writer.add_scalar(f'val/{k}', v, iter)
+                        tb_writer.add_scalar(f'val/{k}', v, i)
 
             # checkpointing
             if val_stats['accuracy'] > best_val_accuracy:
@@ -606,7 +606,7 @@ def main():
                 save_lora_model_checkpoint(
                     model=model,
                     rank=rank,
-                    ckpt_save_path=os.path.join(cfg.ckpt_dir, f'lora_{cfg.model_type}-iter-{iter}.pth'),
+                    ckpt_save_path=os.path.join(cfg.ckpt_dir, f'lora_{cfg.model_type}-iter-{i}.pth'),
                     train_bias=cfg.train_bias,
                     train_head=cfg.train_head,
                 )
