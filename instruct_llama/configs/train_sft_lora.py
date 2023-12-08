@@ -78,6 +78,9 @@ class config:
     attn_dropout: float = 0.0
     resid_dropout: float = 0.0
 
+    mixed_precision: bool = True  # default to BF16, but if no native GPU support detected, will use FP16.
+    compile_model: bool = False  # BUG in torch 2.0.1 and 2.1.0, UserWarning: Torchinductor does not support code generation for complex operators. Performance may be worse than eager
+
     # others
     seed: int = 127
     log_dir: str = './logs/train_sft_lora'  # save logs and traces
