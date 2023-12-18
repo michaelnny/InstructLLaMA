@@ -1,12 +1,18 @@
+# Copyright (c) 2023 Michael Hu.
+# This project is released under the MIT License.
+# See the accompanying LICENSE file for details.
+
+
 import os
 import json
 import chardet
+import gzip
 from typing import Iterable, List, Tuple, Mapping, Text, Any
 
 
 def find_certain_files_under_dir(root_dir: str, file_type: str = '.txt') -> Iterable[str]:
     """Given a root folder, find all files in this folder and it's sub folders that matching the given file type."""
-    assert file_type in ['.txt', '.json', '.jsonl', '.parquet', '.zst']
+    assert file_type in ['.txt', '.json', '.jsonl', '.parquet', '.zst', '.json.gz', '.jsonl.gz']
 
     files = []
     if os.path.exists(root_dir):
@@ -72,9 +78,27 @@ def read_jsonl_file(input_file: str) -> Iterable[Mapping[Text, Any]]:
     with open(input_file, 'r', encoding='utf-8') as file:
         for line in file:
             try:
-                yield json.loads(line.strip())
-            except json.decoder.JSONDecodeError:
-                print(f'Skip line in file {input_file}')
+                yield json.loads(line)
+            except json.decoder.JSONDecodeError as e:
+                print(f'{e}, skip line in file {input_file}')
+                continue
+
+
+def read_zipped_jsonl_file(input_file: str) -> Iterable[Mapping[Text, Any]]:
+    """Generator yields a list of json objects or None if input file not exists or is not .jsonl file."""
+    if (
+        not os.path.exists(input_file)
+        or not os.path.isfile(input_file)
+        or (not input_file.endswith('.json.gz') and not input_file.endswith('.jsonl.gz'))
+    ):
+        return None
+
+    with gzip.open(input_file, 'rt', encoding='utf-8') as file:
+        for line in file:
+            try:
+                yield json.loads(line)
+            except json.decoder.JSONDecodeError as e:
+                print(f'{e}, skip line in file {input_file}')
                 continue
 
 

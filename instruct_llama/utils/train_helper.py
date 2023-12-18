@@ -1,11 +1,17 @@
-from typing import Tuple, List, Mapping, Text, Any
-import numpy as np
+# Copyright (c) 2023 Michael Hu.
+# This project is released under the MIT License.
+# See the accompanying LICENSE file for details.
 
+
+from typing import Tuple, List, Mapping, Text, Any
+import logging
+import numpy as np
+import math
 import torch
 import torch.distributed as dist
-
 from torch.distributed.fsdp.api import ShardingStrategy
 
+import bitsandbytes as bnb
 
 # support running without installing as a package
 from pathlib import Path
@@ -13,6 +19,8 @@ import sys
 
 wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
+
+logger = logging.getLogger(__name__)
 
 
 def create_trace_profiler(tb_trace_dir: str) -> torch.profiler.profile:
@@ -38,7 +46,7 @@ def create_optimizer(
     weight_decay: float,
     betas: Tuple[float],
     fused: bool = False,
-    use_bnb_8bit: bool = False,
+    paged_adamw: bool = False,
 ) -> torch.optim.AdamW:
     """
     Returns the PyTorch AdamW optimizer for the model,
@@ -46,34 +54,32 @@ def create_optimizer(
     and apply weight decay to the reset of parameters.
     """
 
-    # filter out those do not require gradients
-    params_dict = {p_name: params for p_name, params in model.named_parameters() if params.requires_grad}
-
     # Create empty lists to store parameters for weight decay and no weight decay.
     decay = []
     no_decay = []
 
-    for p_name, params in params_dict.items():
-        # Check for parameters corresponding to torch.nn.LayerNorm or torch.nn.Embedding.
-        # Note we use hard-coded names where 'ln' is for LayerNorm, and 'embed' is for Embedding, this works better with FSDP
-        if (
-            p_name.endswith('bias')
-            or p_name.endswith('attention_norm.weight')
-            or p_name.endswith('ffn_norm.weight')
-            or p_name.endswith('post_norm.weight')
-            or p_name.endswith('token_embeddings.weight')
-        ):
-            no_decay.append(params)
-        else:
-            decay.append(params)
+    for p_name, params in model.named_parameters():
+        is_trainable = params.requires_grad
 
-    num_decay_params = sum(p.numel() for p in decay)
-    num_nodecay_params = sum(p.numel() for p in no_decay)
-    total_num_params = sum(p.numel() for p in params_dict.values())
-    assert num_decay_params + num_nodecay_params == total_num_params
+        if is_trainable:
+            # Check for parameters corresponding to torch.nn.LayerNorm or torch.nn.Embedding.
+            # Note we use hard-coded names where 'ln' is for LayerNorm, and 'embed' is for Embedding, this works better with FSDP
+            if (
+                p_name.endswith('bias')
+                or p_name.endswith('attention_norm.weight')
+                or p_name.endswith('ffn_norm.weight')
+                or p_name.endswith('post_norm.weight')
+                or p_name.endswith('token_embeddings.weight')
+            ):
+                no_decay.append(params)
+            else:
+                decay.append(params)
 
-    print(f'num decayed parameter tensors: {len(decay)}, with {num_decay_params:,} parameters')
-    print(f'num non-decayed parameter tensors: {len(no_decay)}, with {num_nodecay_params:,} parameters')
+    if weight_decay > 0:
+        num_decay_params = sum(p.numel() for p in decay)
+        num_nodecay_params = sum(p.numel() for p in no_decay)
+        logger.info(f'Number of decayed parameters: {num_decay_params:,}')
+        logger.info(f'Number of non-decayed parameters: {num_nodecay_params:,}')
 
     # create the pytorch optimizer object
     optim_groups = [
@@ -81,14 +87,39 @@ def create_optimizer(
         {'params': no_decay, 'weight_decay': 0.0},
     ]
 
-    if use_bnb_8bit:
-        import bitsandbytes as bnb
+    kwargs = {
+        'lr': lr,
+        'eps': eps,
+        'betas': betas,
+    }
 
-        optimizer = bnb.optim.AdamW8bit(optim_groups, lr=lr, eps=eps, betas=betas)
+    if paged_adamw:
+        optimizer = bnb.optim.PagedAdamW(optim_groups, **kwargs)
     else:
-        optimizer = torch.optim.AdamW(optim_groups, lr=lr, eps=eps, betas=betas, fused=fused)
+        kwargs['fused'] = fused
+        optimizer = torch.optim.AdamW(optim_groups, **kwargs)
 
     return optimizer
+
+
+def compute_num_trainable_params(model: torch.nn.Module) -> Tuple[int, int]:
+    num_trainable_params = 0
+    num_frozen_params = 0
+
+    for p_name, params in model.named_parameters():
+        is_trainable = params.requires_grad
+        is_quantized = hasattr(params, 'quant_state')
+
+        # quantized layer is not trainable
+        if not is_trainable and is_quantized:
+            num_params = math.prod(params.quant_state.shape)
+        else:
+            num_params = params.numel()
+
+        num_trainable_params += num_params if is_trainable else 0
+        num_frozen_params += num_params if not is_trainable else 0
+
+    return num_trainable_params, num_frozen_params
 
 
 def split_indices_into_bins(
@@ -147,13 +178,13 @@ def masked_whiten(
     tensor = tensor * mask
     mean = masked_mean(tensor, mask, dim=dim)
 
-    if len(tensor.shape) > len(mean.shape):
+    if len(tensor.shape) > len(mean.shape) and len(mean.shape) == 1:
         mean = mean.unsqueeze(1)
 
     mean_centered = tensor - mean
 
     var = masked_mean(mean_centered**2, mask, dim=dim)
-    if len(tensor.shape) > len(var.shape):
+    if len(tensor.shape) > len(var.shape) and len(var.shape) == 1:
         var = var.unsqueeze(1)
 
     var = torch.where(var == 0, 1.0, var)

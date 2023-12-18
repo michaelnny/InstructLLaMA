@@ -1,0 +1,9 @@
+{
+  "data_structure": "A list of prompt:completion token sequences pairs.",
+  "home_page": "https://www.amazon.science/blog/amazon-releases-new-dataset-for-commonsense-dialogue",
+  "language": "English",
+  "name": "Commonsense dialogue",
+  "num_train_samples": 3673,
+  "num_validation_samples": 482,
+  "vocab_size": 32000
+}

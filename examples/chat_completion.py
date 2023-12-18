@@ -1,3 +1,8 @@
+# Copyright (c) 2023 Michael Hu.
+# This project is released under the MIT License.
+# See the accompanying LICENSE file for details.
+
+
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 
@@ -11,7 +16,7 @@ wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 
 
-from instruct_llama.utils.generation import Llama
+from instruct_llama.generation import Llama
 
 
 def main(
@@ -107,7 +112,7 @@ These are just a few of the many attractions that Paris has to offer. With so mu
 if __name__ == '__main__':
     main(
         # ckpt_dir="./meta_checkpoints/llama-2/llama-2-7b-chat",  # Meta fine-tuned chat model
-        # ckpt_dir='./checkpoints/7b-sft',  # our fine-tuned chat model
-        ckpt_dir='./checkpoints/7b-ppo',  # our RL trained chat model
-        tokenizer_path='./meta_checkpoints/llama-2/tokenizer.model',
+        # ckpt_dir='./merged_checkpoints/7b-sft',  # our fine-tuned chat model
+        ckpt_dir='./merged_checkpoints/7b-rlhf',  # our RL trained chat model
+        tokenizer_path='./meta_checkpoints/tokenizer.model',
     )

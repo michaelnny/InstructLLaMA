@@ -1,3 +1,8 @@
+# Copyright (c) 2023 Michael Hu.
+# This project is released under the MIT License.
+# See the accompanying LICENSE file for details.
+
+
 """
 Module for build instruct fine-tuning datasets.
 """
@@ -10,6 +15,7 @@ import shutil
 import json
 import random
 import pickle
+
 import re
 import torch
 
@@ -21,16 +27,10 @@ wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 
 
-from instruct_llama.utils import (
-    Tokenizer,
-    create_logger,
-    find_certain_files_under_dir,
-    read_json_file,
-    read_jsonl_file,
-    count_words,
-    build_prompt_completion,
-    Dialog,
-)
+from instruct_llama.tokenizer import Tokenizer
+from instruct_llama.utils.logging import create_logger
+from instruct_llama.utils.file_helper import find_certain_files_under_dir, read_json_file, read_jsonl_file, count_words
+from instruct_llama.utils.prompt_builder import build_prompt_completion, Dialog
 
 logger = create_logger()
 
@@ -66,7 +66,7 @@ def _split_and_save_datasets(
 
     for data, out_file in zip((train_set, val_set), (train_output_file, val_output_file)):
         if len(data) > 0:
-            logger.info(f'Saving {len(data)} processed data to "{out_file}" ...')
+            logger.info(f'Saving {len(data)} processed data to {out_file!r} ...')
             pickle.dump(data, open(out_file, 'wb'))
 
     meta = {
@@ -75,7 +75,7 @@ def _split_and_save_datasets(
         'num_validation_samples': len(val_set),
     }
 
-    logger.info(f'Saving metadata to "{meta_output_file}" ...')
+    logger.info(f'Saving metadata to {meta_output_file!r} ...')
 
     with open(meta_output_file, 'w', encoding='utf-8') as f:
         json.dump(meta, f, indent=2, sort_keys=True)
@@ -107,7 +107,7 @@ def _process_single_dm_math_txt_file(txt_file: str, tokenizer: Tokenizer) -> Lis
 
 def _raw_texts_to_dialog(dialog_texts: List[str]) -> Dialog:
     """Converts a list of raw text into dialog formation.
-    Note it requires the texts follows the correct user/assistant/user/assistant... order."""
+    Note it requires the texts follows the correct user/assistant/user/assistant ... order."""
 
     # requires at least one turn from each role (user, assistant)
     if len(dialog_texts) < 2:
@@ -134,7 +134,7 @@ def process_dolly_dataset(
     output_dir: str,
     tokenizer: Tokenizer,
     min_prompt_words: int = 5,
-    validation_ratio: float = 0.08,
+    validation_ratio: float = 0.05,
     max_seq_length: int = 2048,  # prompt + completion lengths greater than this are discarded
     overwrite_output: bool = False,
     metadata: Metadata = {
@@ -159,7 +159,7 @@ def process_dolly_dataset(
 
     if any(os.path.exists(f) for f in (train_output_file, val_output_file, meta_output_file)) and not overwrite_output:
         logger.error(
-            f'The output files "{train_output_file}", "{val_output_file}", "{meta_output_file}" already exists, aborting...'
+            f'The output files "{train_output_file}", "{val_output_file}", "{meta_output_file}" already exists, aborting ...'
         )
         return
 
@@ -175,7 +175,7 @@ def process_dolly_dataset(
     # Create the output directory if necessary
     os.makedirs(output_dir, mode=0o777, exist_ok=True)
 
-    logger.info('Processing dolly dataset...')
+    logger.info('Processing dolly dataset ...')
     datasets = []
 
     for item in json_objs:
@@ -210,7 +210,7 @@ def process_dolly_dataset(
     metadata['vocab_size'] = tokenizer.vocab_size
     metadata['data_structure'] = 'A list of prompt:completion token sequences pairs.'
 
-    logger.info('Saving processed dolly dataset...')
+    logger.info('Saving processed dolly dataset ...')
     _split_and_save_datasets(
         datasets,
         validation_ratio,
@@ -250,7 +250,7 @@ def process_alpaca_dataset(
 
     if any(os.path.exists(f) for f in (train_output_file, val_output_file, meta_output_file)) and not overwrite_output:
         logger.error(
-            f'The output files "{train_output_file}", "{val_output_file}", "{meta_output_file}" already exists, aborting...'
+            f'The output files "{train_output_file}", "{val_output_file}", "{meta_output_file}" already exists, aborting ...'
         )
         return
 
@@ -266,7 +266,7 @@ def process_alpaca_dataset(
     # Create the output directory if necessary
     os.makedirs(output_dir, mode=0o777, exist_ok=True)
 
-    logger.info('Processing alpaca dataset...')
+    logger.info('Processing alpaca dataset ...')
     datasets = []
 
     for item in json_objs:
@@ -298,7 +298,7 @@ def process_alpaca_dataset(
     metadata['vocab_size'] = tokenizer.vocab_size
     metadata['data_structure'] = 'A list of prompt:completion token sequences pairs.'
 
-    logger.info('Saving processed alpaca dataset...')
+    logger.info('Saving processed alpaca dataset ...')
     _split_and_save_datasets(
         datasets,
         validation_ratio,
@@ -365,7 +365,7 @@ def process_deepmind_math_dataset(
 
     if any(os.path.exists(f) for f in (train_output_file, val_output_file, meta_output_file)) and not overwrite_output:
         logger.error(
-            f'The output files "{train_output_file}", "{val_output_file}", "{meta_output_file}" already exists, aborting...'
+            f'The output files "{train_output_file}", "{val_output_file}", "{meta_output_file}" already exists, aborting ...'
         )
         return
 
@@ -373,7 +373,7 @@ def process_deepmind_math_dataset(
         metadata = {}
 
     if os.path.exists(output_dir) and overwrite_output:
-        logger.info(f'cleanup output folder "{output_dir}"')
+        logger.info(f'cleanup output folder {output_dir!r}')
         shutil.rmtree(output_dir)
 
     # Create the output directory if necessary
@@ -411,7 +411,7 @@ def process_deepmind_math_dataset(
         random.shuffle(datasets)
         datasets = datasets[:max_num_sample]
 
-    logger.info('Saving processed DeepMind Mathematics dataset...')
+    logger.info('Saving processed DeepMind Mathematics dataset ...')
     _split_and_save_datasets(
         datasets,
         validation_ratio,
@@ -449,7 +449,7 @@ def process_squad_dataset(
 
     if any(os.path.exists(f) for f in (train_output_file, val_output_file, meta_output_file)) and not overwrite_output:
         logger.error(
-            f'The output files "{train_output_file}", "{val_output_file}", "{meta_output_file}" already exists, aborting...'
+            f'The output files "{train_output_file}", "{val_output_file}", "{meta_output_file}" already exists, aborting ...'
         )
         return
 
@@ -510,23 +510,23 @@ def process_squad_dataset(
 
         return dataset
 
-    logger.info('Processing SQuAD dataset...')
+    logger.info('Processing SQuAD dataset ...')
 
-    train_dataset = json_to_dataset(os.path.join(src_dir, 'train.json'))
-    val_dataset = json_to_dataset(os.path.join(src_dir, 'validation.json'))
+    train_dataset = json_to_dataset(os.path.join(src_dir, 'train-v2.0.json'))
+    val_dataset = json_to_dataset(os.path.join(src_dir, 'dev-v2.0.json'))
 
     metadata['vocab_size'] = tokenizer.vocab_size
     metadata['data_structure'] = 'A list of prompt:completion token sequences pairs.'
     metadata['num_train_samples'] = len(train_dataset)
     metadata['num_validation_samples'] = len(val_dataset)
 
-    logger.info(f'Saving {len(train_dataset)} processed data to "{train_output_file}" ...')
+    logger.info(f'Saving {len(train_dataset)} processed data to {train_output_file!r} ...')
     pickle.dump(train_dataset, open(train_output_file, 'wb'))
 
-    logger.info(f'Saving {len(val_dataset)} processed data to "{val_output_file}" ...')
+    logger.info(f'Saving {len(val_dataset)} processed data to {val_output_file!r} ...')
     pickle.dump(val_dataset, open(val_output_file, 'wb'))
 
-    logger.info(f'Saving metadata to "{meta_output_file}" ...')
+    logger.info(f'Saving metadata to {meta_output_file!r} ...')
     with open(meta_output_file, 'w', encoding='utf-8') as f:
         json.dump(metadata, f, indent=2, sort_keys=True)
 
@@ -557,7 +557,7 @@ def process_commonsense_dialog_dataset(
 
     if any(os.path.exists(f) for f in (train_output_file, val_output_file, meta_output_file)) and not overwrite_output:
         logger.error(
-            f'The output files "{train_output_file}", "{val_output_file}", "{meta_output_file}" already exists, aborting...'
+            f'The output files "{train_output_file}", "{val_output_file}", "{meta_output_file}" already exists, aborting ...'
         )
         return
 
@@ -603,7 +603,7 @@ def process_commonsense_dialog_dataset(
 
         return dataset
 
-    logger.info('Processing Commonsense dialogues dataset...')
+    logger.info('Processing Commonsense dialogues dataset ...')
 
     train_dataset = _dataset_from_json_file(train_file)
     val_dataset = _dataset_from_json_file(val_file)
@@ -613,13 +613,13 @@ def process_commonsense_dialog_dataset(
     metadata['num_train_samples'] = len(train_dataset)
     metadata['num_validation_samples'] = len(val_dataset)
 
-    logger.info(f'Saving {len(train_dataset)} processed data to "{train_output_file}" ...')
+    logger.info(f'Saving {len(train_dataset)} processed data to {train_output_file!r} ...')
     pickle.dump(train_dataset, open(train_output_file, 'wb'))
 
-    logger.info(f'Saving {len(val_dataset)} processed data to "{val_output_file}" ...')
+    logger.info(f'Saving {len(val_dataset)} processed data to {val_output_file!r} ...')
     pickle.dump(val_dataset, open(val_output_file, 'wb'))
 
-    logger.info(f'Saving metadata to "{meta_output_file}" ...')
+    logger.info(f'Saving metadata to {meta_output_file!r} ...')
     with open(meta_output_file, 'w', encoding='utf-8') as f:
         json.dump(metadata, f, indent=2, sort_keys=True)
 
@@ -654,7 +654,7 @@ def process_msc_dialog_dataset(
 
     if any(os.path.exists(f) for f in (train_output_file, val_output_file, meta_output_file)) and not overwrite_output:
         logger.error(
-            f'The output files "{train_output_file}", "{val_output_file}", "{meta_output_file}" already exists, aborting...'
+            f'The output files "{train_output_file}", "{val_output_file}", "{meta_output_file}" already exists, aborting ...'
         )
         return
 
@@ -735,7 +735,7 @@ def process_msc_dialog_dataset(
 
         return dataset
 
-    logger.info('Processing msc dataset...')
+    logger.info('Processing msc dataset ...')
     train_dataset = _dataset_from_files(train_files)
     val_dataset = _dataset_from_files(val_files)
 
@@ -744,40 +744,44 @@ def process_msc_dialog_dataset(
     metadata['num_train_samples'] = len(train_dataset)
     metadata['num_validation_samples'] = len(val_dataset)
 
-    logger.info(f'Saving {len(train_dataset)} processed data to "{train_output_file}" ...')
+    logger.info(f'Saving {len(train_dataset)} processed data to {train_output_file!r} ...')
     pickle.dump(train_dataset, open(train_output_file, 'wb'))
 
-    logger.info(f'Saving {len(val_dataset)} processed data to "{val_output_file}" ...')
+    logger.info(f'Saving {len(val_dataset)} processed data to {val_output_file!r} ...')
     pickle.dump(val_dataset, open(val_output_file, 'wb'))
 
-    logger.info(f'Saving metadata to "{meta_output_file}" ...')
+    logger.info(f'Saving metadata to {meta_output_file!r} ...')
     with open(meta_output_file, 'w', encoding='utf-8') as f:
         json.dump(metadata, f, indent=2, sort_keys=True)
 
 
 if __name__ == '__main__':
-    tokenizer = Tokenizer(model_path='./meta_checkpoints/llama-2/tokenizer.model')
+    seed = 1
+    torch.manual_seed(seed)
+    random.seed(seed)
+
+    tokenizer = Tokenizer(model_path='./meta_checkpoints/tokenizer.model')
 
     process_dolly_dataset(
-        src_file='./raw_data/databricks-dolly-15k.jsonl',
+        src_file='/home/michael/datasets/dolly_15k/databricks-dolly-15k.jsonl',
         output_dir='./datasets/dolly',
         tokenizer=tokenizer,
     )
 
     process_alpaca_dataset(
-        src_file='./raw_data/alpaca_data_cleaned.json',
+        src_file='/home/michael/datasets/alpaca_dataset/alpaca_cleaned.json',
         output_dir='./datasets/alpaca',
         tokenizer=tokenizer,
     )
 
     process_squad_dataset(
-        src_dir='./raw_data/squad',
+        src_dir='/home/michael/datasets/squad_2.0',
         output_dir='./datasets/squad',
         tokenizer=tokenizer,
     )
 
     process_commonsense_dialog_dataset(
-        src_dir='./raw_data/commonsense_dialogues',
+        src_dir='/home/michael/datasets/commonsense_dialogues',
         output_dir='./datasets/commonsense_dialogues',
         tokenizer=tokenizer,
     )

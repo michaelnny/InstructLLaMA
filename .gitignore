@@ -1,17 +1,19 @@
 # Mac OS
 *.DS_Store
 
-# Datasets
-raw_data/
-datasets/
+# Datasets too big
 *.tar
 *.zst
-*.jsonl
+datasets/hh-rlhf
+datasets/red_pajama_mini
+datasets/stack_exchange_preferences
 
 
 # Checkpoints
-meta_checkpoints/*
 checkpoints/*
+merged_checkpoints/*
+meta_checkpoints/*
+
 
 
 # logs

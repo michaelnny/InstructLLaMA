@@ -1,3 +1,8 @@
+# Copyright (c) 2023 Michael Hu.
+# This project is released under the MIT License.
+# See the accompanying LICENSE file for details.
+
+
 import math
 import torch
 

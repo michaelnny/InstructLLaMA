@@ -1,8 +1,13 @@
+# Copyright (c) 2023 Michael Hu.
+# This project is released under the MIT License.
+# See the accompanying LICENSE file for details.
+
+
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
-
+import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from typing import Any, Optional, Tuple, Iterable
 from typing_extensions import Self
 import numpy as np
@@ -10,10 +15,11 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+logger = logging.getLogger(__name__)
 
 # llama 2 models
 llama_configs = {
-    '1B': dict(n_layers=8, n_heads=8, dim=1024),  # for code testing only
+    '3B': dict(n_layers=16, n_heads=32, dim=4096),  # for RM model
     '7B': dict(n_layers=32, n_heads=32, dim=4096),
     '13B': dict(n_layers=40, n_heads=40, dim=5120),
     '70B': dict(n_layers=80, n_heads=64, dim=8192),
@@ -42,7 +48,7 @@ class ModelArgs:
     head_type: str = 'lm_head'  # 'lm_head', 'scalar_head'
     use_cache: bool = False  # should only use cache when do inference
 
-    # used during training
+    # dropout regularization
     embed_dropout: float = 0.0
     attn_dropout: float = 0.0
     resid_dropout: float = 0.0
@@ -50,11 +56,17 @@ class ModelArgs:
     def __post_init__(self):
         assert self.head_type in ('lm_head', 'scalar_head')
 
+    def dict(self):
+        return {k: str(v) if not isinstance(v, (float, int, bool, type(None))) else v for k, v in asdict(self).items()}
+
     @classmethod
-    def from_model_type(cls, model_type: str) -> Self:
+    def from_model_type(cls, model_type: str, **kwargs) -> Self:
         assert model_type in supported_model_types
 
-        return cls(**llama_configs[model_type])
+        config = llama_configs[model_type]
+        config.update(kwargs)
+
+        return cls(**config)
 
 
 class RMSNorm(torch.nn.Module):
@@ -297,10 +309,10 @@ class Transformer(nn.Module):
         self.post_norm = RMSNorm(params.dim, eps=params.norm_eps)
 
         if self.params.head_type == 'lm_head':
-            print('Creating LLaMA-2 model with LM head...')
+            logger.info('Creating LLaMA-2 model with LM head ...')
             self.lm_head = nn.Linear(params.dim, params.vocab_size, bias=False)
         elif self.params.head_type == 'scalar_head':
-            print('Creating LLaMA-2 model with scalar head...')
+            logger.info('Creating LLaMA-2 model with scalar head ...')
             self.scalar_head = nn.Linear(params.dim, 1, bias=True)
 
         self.freqs_cis = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.max_seq_len * 2)
@@ -340,22 +352,6 @@ class Transformer(nn.Module):
             output = h
 
         return output
-
-
-class RewardModel(Transformer):
-    def __init__(self, params: ModelArgs):
-        # for to scalar head type
-        setattr(params, 'head_type', 'scalar_head')
-        # Call the constructor of the parent class (Transformer)
-        super().__init__(params)
-
-    def init_head_weights(self):
-        head = self.scalar_head
-        print('Initialize weights for scalar head...')
-
-        init_std = 1.0 / np.sqrt(self.params.dim + 1)
-        torch.nn.init.normal_(head.weight, std=init_std)
-        torch.nn.init.zeros_(head.bias)
 
 
 if __name__ == '__main__':

@@ -1,3 +1,8 @@
+# Copyright (c) 2023 Michael Hu.
+# This project is released under the MIT License.
+# See the accompanying LICENSE file for details.
+
+
 """Converts Meta's LLaMA2 checkpoint into our model structure, merge and save it as a single checkpoint file"""
 
 import gc
@@ -40,7 +45,10 @@ def convert_state_dict(state_dict: Dict[str, torch.Tensor], dtype: torch.dtype =
         elif k == 'output.weight':
             our_k = 'lm_head.weight'
 
-        converted[our_k] = state_dict[k].to(dtype)
+        if 'norm' in k:
+            converted[our_k] = state_dict[k].to(torch.float32)
+        else:
+            converted[our_k] = state_dict[k].to(dtype)
 
     return converted
 
@@ -101,7 +109,7 @@ def convert_meta_weights(
     output_dir = output_dir / full_model_type
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f'Starting to convert LLaMA 2 model weights for model type {model_type}, this may take few minutes...')
+    print(f'Starting to convert LLaMA 2 model weights for model type {model_type}, this may take few minutes ...')
 
     checkpoint_files = sorted(model_ckpt_dir.glob('*.pth'))
     checkpoint_files.sort()
@@ -112,11 +120,11 @@ def convert_meta_weights(
             f'No checkpoints were found at checkpoint root dir {model_ckpt_dir}. `consolidated.0*.pth` files expected at that location.'
         )
 
-    print(f'Found {n_checkpoints} checkpoint shards, will merge these into a single checkpoint...')
+    print(f'Found {n_checkpoints} checkpoint shards, will merge these into a single checkpoint ...')
 
     # the tokenizer is the same for all model sizes, so we store it in the output parent dir
     if not (output_dir.parent / 'tokenizer.model').exists():
-        print(f'Copying tokenizer model to {output_dir.parent}...')
+        print(f'Copying tokenizer model to {output_dir.parent} ...')
         shutil.copy(meta_root_ckpt_dir / 'tokenizer.model', output_dir.parent)
 
     # for the bigger models, there are multiple model-parallel checkpoints
@@ -146,7 +154,7 @@ def convert_meta_weights(
 
     if verify:
         # note with bf16, 7B model will consume 14GB GPU RAM
-        print('Verifying the merged checkpoint state by calling model.load_state_dict on our model...')
+        print('Verifying the merged checkpoint state by calling model.load_state_dict on our model ...')
 
         if device == 'cuda':
             torch.set_default_tensor_type(torch.cuda.HalfTensor)
@@ -163,20 +171,20 @@ def convert_meta_weights(
     print(f'Saving merged checkpoint to {ckpt_save_path} ...')
     torch.save(combined, ckpt_save_path)
 
-    print(f'Copying params.json to {output_dir}...')
+    print(f'Copying params.json to {output_dir} ...')
     shutil.copy(model_ckpt_dir / 'params.json', output_dir)
 
 
 if __name__ == '__main__':
     convert_meta_weights(
-        meta_root_ckpt_dir=Path('/home/michael/llama-2'),
-        output_dir=Path('./meta_checkpoints/llama-2'),
+        meta_root_ckpt_dir=Path('/home/michael/models/LLaMA-2'),
+        output_dir=Path('./meta_checkpoints'),
         model_type='7B',
         verify=True,
     )
     convert_meta_weights(
-        meta_root_ckpt_dir=Path('/home/michael/llama-2'),
-        output_dir=Path('./meta_checkpoints/llama-2'),
+        meta_root_ckpt_dir=Path('/home/michael/models/LLaMA-2'),
+        output_dir=Path('./meta_checkpoints'),
         model_type='7B-chat',
         verify=True,
     )

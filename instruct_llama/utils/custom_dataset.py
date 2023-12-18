@@ -1,3 +1,8 @@
+# Copyright (c) 2023 Michael Hu.
+# This project is released under the MIT License.
+# See the accompanying LICENSE file for details.
+
+
 from typing import Iterable, List
 import os
 import random
@@ -185,6 +190,9 @@ class BlendedDataset(IterableDataset):
     def _choose_datasource(self) -> int:
         return random.choices(range(len(self.data_sources)), weights=self.sample_weights, k=1)[0]
 
+    def __len__(self):
+        return int(self.total_num_tokens / (self.max_seq_len))
+
     def get_metadata(self):
         return {
             'dataset_type': 'blended',
@@ -328,18 +336,29 @@ class ComparisonsDataset(Dataset):
 
 
 class PromptOnlyDataset(Dataset):
-    def __init__(self, data_sources: Iterable[str], max_seq_len: int = 2048, max_samples: int = 50000, seed: int = 1) -> None:
+    def __init__(
+        self,
+        data_sources: Iterable[str],
+        min_seq_len: int = 6,
+        max_seq_len: int = 2048,
+        max_samples: int = 50000,
+        seed: int = 1,
+    ) -> None:
         """
         Args:
             data_sources: a list of string path to where to load the dataset.
+            min_seq_len: prompt_tokens length lesser than this will be discarded.
             max_seq_len: prompt_tokens length greater than this will be discarded.
             max_samples: maximum number of samples to include.
         """
 
         assert len(data_sources) > 0
+        assert min_seq_len >= 6
         assert max_seq_len > 128
+        assert min_seq_len <= max_seq_len
 
         self.data_sources = data_sources
+        self.min_seq_len = min_seq_len
         self.max_seq_len = max_seq_len
         self.max_samples = max_samples
 
@@ -355,7 +374,7 @@ class PromptOnlyDataset(Dataset):
             for sample in samples:
                 x = sample['prompt_tokens']
                 seq_length = len(x)
-                if seq_length <= self.max_seq_len:
+                if seq_length >= self.min_seq_len and seq_length <= self.max_seq_len:
                     self.data.append(x)
                     seq_length_stats.append(seq_length)
 

@@ -1,3 +1,8 @@
+# Copyright (c) 2023 Michael Hu.
+# This project is released under the MIT License.
+# See the accompanying LICENSE file for details.
+
+
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 
@@ -60,6 +65,6 @@ def main(
 
 if __name__ == '__main__':
     main(
-        ckpt_dir='./meta_checkpoints/llama-2/llama-2-7b/',
-        tokenizer_path='./checkpoints/llama-2/tokenizer.model',
+        ckpt_dir='./meta_checkpoints/llama-2-7b/',
+        tokenizer_path='./checkpoints/tokenizer.model',
     )

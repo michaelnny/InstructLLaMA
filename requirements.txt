@@ -6,6 +6,9 @@ numpy
 tensorboard
 torch_tb_profiler==0.4.1
 
-bitsandbytes
+bitsandbytes # 4bit quantization
 
-zstandard  # prepare redpajama pretrain dataset
+# preparing and building datasets
+pyarrow
+pandas
+bs4

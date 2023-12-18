@@ -5,19 +5,12 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Python: torchrun",
+            "name": "Python: Current File",
             "type": "python",
             "request": "launch",
-            "program": "/home/michael/.local/bin/torchrun",
+            "program": "${file}",
             "console": "integratedTerminal",
-            "justMyCode": true,
-            "args": [
-                "--nproc_per_node=1",
-                "instruct_llama/train_ppo_lora.py" // "instruct_llama/train_ppo_lora.py"
-            ],
-            "env": {
-                "CUDA_VISIBLE_DEVICES": "0"
-            },
+            "justMyCode": false
         }
     ]
 }

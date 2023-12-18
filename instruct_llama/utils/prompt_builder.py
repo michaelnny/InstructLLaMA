@@ -1,3 +1,8 @@
+# Copyright (c) 2023 Michael Hu.
+# This project is released under the MIT License.
+# See the accompanying LICENSE file for details.
+
+
 """Build prompt-completion pairs using LLaMA-2 predefined chat style format.
 
 We rewrite the original code to make it easier to understand, we can also use the code to build fine-tuning samples.
@@ -12,7 +17,7 @@ wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 
 
-from instruct_llama.utils.tokenizer import Tokenizer
+from instruct_llama.tokenizer import Tokenizer
 
 Role = Literal['system', 'user', 'assistant']
 
@@ -78,7 +83,7 @@ def build_prompt_completion(dialog: Dialog, tokenizer: Tokenizer) -> Tuple[List[
         and all([msg['role'] == 'assistant' for msg in dialog[2::2]])
     ), (
         "model only supports 'system', 'user' and 'assistant' roles, "
-        "starting with 'system', then 'user' and alternating (u/a/u/a/u...)"
+        "starting with 'system', then 'user' and alternating (u/a/u/a/u ...)"
     )
 
     # store user-prompt:answer pairs so we can later add BOS, EOS tokens to each pair

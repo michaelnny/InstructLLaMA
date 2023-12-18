@@ -1,3 +1,8 @@
+# Copyright (c) 2023 Michael Hu.
+# This project is released under the MIT License.
+# See the accompanying LICENSE file for details.
+
+
 """
 Module for build pretraining datasets.
 """
@@ -11,7 +16,7 @@ import random
 import pickle
 import copy
 import numpy as np
-import zstandard as zstd
+
 
 # support running without installing as a package
 from pathlib import Path
@@ -21,11 +26,10 @@ wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 
 
-from instruct_llama.utils import (
-    Tokenizer,
-    create_logger,
-    find_certain_files_under_dir,
-)
+from instruct_llama.tokenizer import Tokenizer
+from instruct_llama.utils.logging import create_logger
+from instruct_llama.utils.file_helper import find_certain_files_under_dir, read_zipped_jsonl_file
+
 
 logger = create_logger()
 
@@ -40,13 +44,13 @@ def _save_dataset_to_disk(metadata, output_dir, data_type, dataset_prefix, num_t
         random.shuffle(temp_files)
 
     save_fname = os.path.join(output_dir, f'{dataset_prefix}.npy')
-    logger.info(f'Merging and saving dataset to "{save_fname}" ...')
+    logger.info(f'Merging and saving dataset to {save_fname!r} ...')
     _merge_and_write_to_disk(temp_files, data_type, num_tokens, save_fname)
 
     metadata['num_tokens'] = num_tokens
 
     meta_file_json = os.path.join(output_dir, f'{dataset_prefix}_meta.json')
-    logger.info(f'Saving metadata to "{meta_file_json}"...')
+    logger.info(f'Saving metadata to {meta_file_json!r} ...')
 
     with open(meta_file_json, 'w', encoding='utf-8') as f:
         json.dump(metadata, f, indent=2, sort_keys=True)
@@ -87,10 +91,10 @@ def _merge_and_write_to_disk(temp_files, data_type, max_items, output_file, dele
             os.remove(f)
 
 
-def process_single_file(input_file: str, tokenizer: Tokenizer, val_ratio: float, output_dir: str, max_chunk_size: int = 2):
+def process_single_file(
+    input_file: str, tokenizer: Tokenizer, validation_ratio: float, output_dir: str, max_chunk_size: int = 2
+):
     base_name = os.path.basename(input_file)
-
-    is_zst = input_file.endswith('.zst')
 
     tokens = {'train': [], 'validation': []}
     temp_files = {'train': [], 'validation': []}
@@ -105,24 +109,18 @@ def process_single_file(input_file: str, tokenizer: Tokenizer, val_ratio: float,
         temp_files[ds_prefix].append(temp_f)
         tokens[ds_prefix] = []
 
-    if is_zst:
-        file_open = lambda path: zstd.open(open(path, 'rb'), 'rt', encoding='utf-8')  # noqa: E731
-    else:
-        file_open = lambda path: open(path, encoding='utf-8')  # noqa: E731
+    for row in read_zipped_jsonl_file(input_file):
+        text = row['raw_content']
+        text_ids = tokenizer.encode(text, bos=True, eos=True)
 
-    with file_open(input_file) as f:
-        for row in f:
-            text = json.loads(row)['text']
-            text_ids = tokenizer.encode(text, bos=True, eos=True)
+        ds_prefix = 'validation' if random.random() < validation_ratio else 'train'
+        tokens[ds_prefix].extend(text_ids)
+        num_tokens[ds_prefix] += len(text_ids)
 
-            ds_prefix = 'validation' if random.random() < val_ratio else 'train'
-            tokens[ds_prefix].extend(text_ids)
-            num_tokens[ds_prefix] += len(text_ids)
-
-            # Write current chunk to disk to free up RAM.
-            # one integer takes 28 bytes, so 1GB RAM = 1e9 bytes
-            if len(tokens[ds_prefix]) * 28 >= max_chunk_size * 1e9:
-                write_chunk_to_disk(ds_prefix)
+        # Write current chunk to disk to free up RAM.
+        # one integer takes 28 bytes, so 1GB RAM = 1e9 bytes
+        if len(tokens[ds_prefix]) * 28 >= max_chunk_size * 1e9:
+            write_chunk_to_disk(ds_prefix)
 
     # Handle remaining chunk
     for ds_prefix in tokens.keys():
@@ -136,12 +134,12 @@ def process_redparjama_dataset(
     src_dir: str,
     output_dir: str,
     tokenizer: Tokenizer,
-    val_ratio=0.1,
+    validation_ratio: float = 0.05,
     max_chunk_size=2,  # RAM GB
     num_workers=8,
     overwrite_output: bool = False,
     metadata: Metadata = {
-        'name': 'Red Pajama',
+        'name': 'Red Pajama v2',
         'language': 'English',
         'home_page': 'https://github.com/togethercomputer/RedPajama-Data',
     },
@@ -160,15 +158,14 @@ def process_redparjama_dataset(
     val_output_file = os.path.join(output_dir, 'validation.npy')
 
     if any(os.path.exists(f) for f in (train_output_file, val_output_file)) and not overwrite_output:
-        logger.error(f'The output files "{train_output_file}", "{val_output_file}" already exists, aborting...')
+        logger.error(f'The output files "{train_output_file}", "{val_output_file}" already exists, aborting ...')
         return
 
     if metadata is None:
         metadata = {}
 
-    # the dataset comes with two file types
-    working_files = find_certain_files_under_dir(src_dir, '.jsonl')
-    working_files.extend(find_certain_files_under_dir(src_dir, '.zst'))
+    # the Red Pajama v2 dataset comes with .json.gz, but are actually .jsonl format
+    working_files = find_certain_files_under_dir(src_dir, '.json.gz')
 
     num_files = len(working_files)
 
@@ -190,7 +187,7 @@ def process_redparjama_dataset(
     process_func = functools.partial(
         process_single_file,
         tokenizer=tokenizer,
-        val_ratio=val_ratio,
+        validation_ratio=validation_ratio,
         output_dir=output_dir,
         max_chunk_size=max_chunk_size,
     )
@@ -244,10 +241,14 @@ def process_redparjama_dataset(
 
 
 if __name__ == '__main__':
-    tokenizer = Tokenizer(model_path='./meta_checkpoints/llama-2/tokenizer.model')
+    seed = 1
+    np.random.seed(seed)
+    random.seed(seed)
+
+    tokenizer = Tokenizer(model_path='./meta_checkpoints/tokenizer.model')
 
     process_redparjama_dataset(
-        src_dir='./raw_data/red_pajama_mini',
+        src_dir='/home/michael/datasets/redpajama-data-v2-mini',
         output_dir='./datasets/red_pajama_mini',
         tokenizer=tokenizer,
         num_workers=12,

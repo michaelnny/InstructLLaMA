@@ -1,0 +1,9 @@
+{
+  "data_structure": "A list of dictionary object with a single key \"prompt_tokens\", which contains the tokenized user prompt",
+  "home_page": "https://github.com/anthropics/hh-rlhf",
+  "language": "English",
+  "name": "Human preference data",
+  "num_train_samples": 160729,
+  "num_validation_samples": 8459,
+  "vocab_size": 32000
+}

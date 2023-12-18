@@ -1,3 +1,8 @@
+# Copyright (c) 2023 Michael Hu.
+# This project is released under the MIT License.
+# See the accompanying LICENSE file for details.
+
+
 """Module to build reward model (RM) comparison dataset"""
 from typing import Tuple, List, Mapping, Text, Any
 import functools
@@ -22,15 +27,17 @@ wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 
 
-from instruct_llama.utils import (
-    Tokenizer,
-    create_logger,
+from instruct_llama.tokenizer import Tokenizer
+from instruct_llama.utils.logging import create_logger
+from instruct_llama.utils.file_helper import (
     find_certain_files_under_dir,
+    read_json_file,
     read_jsonl_file,
+    read_zipped_jsonl_file,
     count_words,
-    build_prompt_completion,
-    Dialog,
 )
+from instruct_llama.utils.prompt_builder import build_prompt_completion, Dialog
+
 
 logger = create_logger()
 
@@ -71,7 +78,7 @@ def _split_and_save_datasets(
 
     for data, out_file in zip((train_set, val_set), (train_output_file, val_output_file)):
         if len(data) > 0:
-            logger.info(f'Saving {len(data)} processed data to "{out_file}" ...')
+            logger.info(f'Saving {len(data)} processed data to {out_file!r} ...')
             pickle.dump(data, open(out_file, 'wb'))
 
     meta = {
@@ -80,7 +87,7 @@ def _split_and_save_datasets(
         'num_validation_samples': len(val_set),
     }
 
-    logger.info(f'Saving metadata to "{meta_output_file}" ...')
+    logger.info(f'Saving metadata to {meta_output_file!r} ...')
 
     with open(meta_output_file, 'w', encoding='utf-8') as f:
         json.dump(meta, f, indent=2, sort_keys=True)
@@ -251,13 +258,12 @@ def _process_single_hh_rlhf_jsonl_file(
     max_seq_len: int,
 ) -> List[Tuple[int]]:
     """
-    Read one single .jsonl file and go over each row to build the dataset samples,
-
+    Read one single .jsonl.gz file and go over each row to build the dataset sample
     """
 
     samples = []
 
-    for row in read_jsonl_file(file_path):
+    for row in read_zipped_jsonl_file(file_path):
         chosen_dialog = _convert_to_llama_chat_format(row['chosen'])
         rejected_dialog = _convert_to_llama_chat_format(row['rejected'])
 
@@ -288,7 +294,7 @@ def process_hh_rlhf_dataset(
     output_dir: str,
     tokenizer: Tokenizer,
     num_workers=8,
-    validation_ratio: float = 0.1,
+    validation_ratio: float = 0.05,
     max_seq_length: int = 2048,  # prompt lengths greater than this are discarded
     overwrite_output: bool = False,
     metadata: Metadata = {
@@ -297,7 +303,7 @@ def process_hh_rlhf_dataset(
         'home_page': 'https://github.com/anthropics/hh-rlhf',
     },
 ) -> None:
-    """Process Human preference dataset and save the tokenized prompt to .pkl format."""
+    """Process Human preference dataset in .jsonl.gz format and save the tokenized prompt:completion pairs to .pkl format."""
 
     assert os.path.exists(src_dir) and os.path.isdir(src_dir)
     assert 0 <= validation_ratio <= 0.2
@@ -308,13 +314,13 @@ def process_hh_rlhf_dataset(
 
     if any(os.path.exists(f) for f in (train_output_file, val_output_file, meta_output_file)) and not overwrite_output:
         logger.error(
-            f'The output files "{train_output_file}", "{val_output_file}", "{meta_output_file}" already exists, aborting...'
+            f'The output files "{train_output_file}", "{val_output_file}", "{meta_output_file}" already exists, aborting ...'
         )
         return
 
     # Create the output directory if necessary
     if os.path.exists(output_dir) and overwrite_output:
-        logger.info(f'cleanup output folder "{output_dir}"')
+        logger.info(f'Cleanup output folder {output_dir!r}')
         shutil.rmtree(output_dir)
 
     os.makedirs(output_dir, mode=0o777, exist_ok=True)
@@ -322,18 +328,18 @@ def process_hh_rlhf_dataset(
     if metadata is None:
         metadata = {}
 
-    working_files = find_certain_files_under_dir(src_dir, '.jsonl')
+    working_files = find_certain_files_under_dir(src_dir, '.jsonl.gz')
 
     num_files = len(working_files)
 
     if num_files == 0:
-        logger.warning('Found no .jsonl file')
+        logger.warning('Found no .jsonl.gz file')
         return
 
     if num_files < num_workers:
         num_workers = num_files
 
-    logger.info(f'Processing {num_files} .jsonl files using {num_workers} workers ...')
+    logger.info(f'Processing {num_files} .jsonl.gz files using {num_workers} workers ...')
 
     process_file_func = functools.partial(
         _process_single_hh_rlhf_jsonl_file,
@@ -360,7 +366,7 @@ def process_hh_rlhf_dataset(
     metadata['min_responses'] = 2
     metadata['max_responses'] = 2
 
-    logger.info('Saving processed Human preference dataset...')
+    logger.info('Saving processed Human preference dataset ...')
     _split_and_save_datasets(
         datasets,
         validation_ratio,
@@ -380,7 +386,7 @@ def process_stackexchange_dataset(
     max_responses: int = 6,
     remove_zero_score: bool = False,
     num_workers=8,
-    validation_ratio: float = 0.1,
+    validation_ratio: float = 0.05,
     max_seq_length: int = 2048,  # prompt + completion lengths greater than this are discarded
     overwrite_output: bool = False,
     metadata: Metadata = {
@@ -400,13 +406,13 @@ def process_stackexchange_dataset(
 
     if any(os.path.exists(f) for f in (train_output_file, val_output_file, meta_output_file)) and not overwrite_output:
         logger.error(
-            f'The output files "{train_output_file}", "{val_output_file}", "{meta_output_file}" already exists, aborting...'
+            f'The output files "{train_output_file}", "{val_output_file}", "{meta_output_file}" already exists, aborting ...'
         )
         return
 
     # Create the output directory if necessary
     if os.path.exists(output_dir) and overwrite_output:
-        logger.info(f'cleanup output folder "{output_dir}"')
+        logger.info(f'Cleanup output folder {output_dir!r}')
         shutil.rmtree(output_dir)
 
     os.makedirs(output_dir, mode=0o777, exist_ok=True)
@@ -456,7 +462,7 @@ def process_stackexchange_dataset(
     metadata['min_responses'] = min_responses
     metadata['max_responses'] = max_responses
 
-    logger.info('Saving processed stack exchange preferences dataset...')
+    logger.info('Saving processed stack exchange preferences dataset ...')
     _split_and_save_datasets(
         datasets,
         validation_ratio,
@@ -468,18 +474,23 @@ def process_stackexchange_dataset(
 
 
 if __name__ == '__main__':
-    tokenizer = Tokenizer(model_path='./meta_checkpoints/llama-2/tokenizer.model')
+    seed = 1
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+
+    tokenizer = Tokenizer(model_path='./meta_checkpoints/tokenizer.model')
 
     process_hh_rlhf_dataset(
-        src_dir='./raw_data/hh-rlhf',
+        src_dir='/home/michael/datasets/hh-rlhf',
         output_dir='./datasets/hh-rlhf',
         tokenizer=tokenizer,
         num_workers=8,
     )
 
     process_stackexchange_dataset(
-        src_dir='./raw_data/stackexchange_dataset',
-        output_dir='./datasets/stackexchange_dataset',
+        src_dir='/home/michael/datasets/stack_exchange_preferences',
+        output_dir='./datasets/stack_exchange_preferences',
         tokenizer=tokenizer,
         num_workers=8,
     )

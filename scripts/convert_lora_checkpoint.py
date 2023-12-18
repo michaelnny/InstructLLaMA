@@ -1,7 +1,13 @@
+# Copyright (c) 2023 Michael Hu.
+# This project is released under the MIT License.
+# See the accompanying LICENSE file for details.
+
+
 """Merge LoRA fine-tunned checkpoint and pretrained checkpoint into a single checkpoint file"""
 
 import os
 import shutil
+import json
 import torch
 import torch.nn as nn
 
@@ -14,8 +20,7 @@ wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 
 
-from instruct_llama.model import Transformer, RewardModel, ModelArgs, supported_model_types
-from instruct_llama.utils import lora
+from instruct_llama.model_lora import Transformer, LoraModelArgs
 
 
 def get_clean_state_dict(model: nn.Module):
@@ -27,41 +32,50 @@ def get_clean_state_dict(model: nn.Module):
     return model_dict
 
 
-def lora_model_lookup(checkpoint: dict) -> int:
-    """Returns the LoRA rank from the adapter checkpoint."""
-    return checkpoint['layers.0.attention.wq.lora_B'].shape[1]
+def convert_model_to_dtype(model: torch.nn.Module, dtype) -> None:
+    for name, module in model.named_modules():
+        if 'norm' in name:
+            module = module.to(torch.float32)
+        if 'lm_head' in name or 'token_embeddings' in name:
+            if hasattr(module, 'weight'):
+                if module.weight.dtype != dtype:
+                    module = module.to(dtype)
+        else:
+            module = module.to(dtype)
 
 
 def merge_lora_checkpoint(
-    model_type: str,
+    base_ckpt_path: str,
     lora_ckpt_path: str,
-    base_ckpt_dir: str,
     save_path: str,
-    lora_alpha: int = 32,
-    dtype: torch.dtype = torch.bfloat16,
-    is_reward_model: bool = False,
+    dtype=torch.bfloat16,
 ) -> None:
     """Merges LoRA weights with pretrained base model.
 
     Args:
-        model_type: The llama-2 model type, supports 'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'.
+        base_ckpt_path: The base checkpoint (like pre-trained or fine-tuned) used for training with lora.
         lora_ckpt_path: Path to the checkpoint with trained LoRA weights, which are the output of
             `finetune_lora.py`.
-        base_ckpt_dir: The base checkpoint (like pre-trained or fine-tuned) used for training with lora.
         save_path: target path to save the merged stat_dict.
-        lora_alpha: the lora alpha value used during fine-tuning, default 32.
         dtype: save model weights and biases in the given target data type, default torch.bfloat16.
     """
 
-    assert model_type in supported_model_types
-
     if not os.path.exists(lora_ckpt_path):
-        raise ValueError(f'LoRA checkpoint file {lora_ckpt_path} does not exist, aborting...')
-    if not os.path.exists(base_ckpt_dir):
-        raise ValueError(f'Pretrained checkpoint dir {base_ckpt_dir} does not exist, aborting...')
+        raise ValueError(f'LoRA checkpoint file {lora_ckpt_path!r} does not exist, aborting ...')
+    if not os.path.exists(base_ckpt_path):
+        raise ValueError(f'Pretrained checkpoint dir {base_ckpt_path!r} does not exist, aborting ...')
 
     if os.path.exists(save_path):
-        print(f'The checkpoint file {save_path} already exists, aborting...')
+        print(f'The checkpoint file {save_path!r} already exists, aborting ...')
+        return
+
+    # try to get lora_params.json file based on the lora_ckpt_path
+    lora_dir = os.path.dirname(lora_ckpt_path)
+
+    # Create the path to the JSON file based on the directory
+    params_path = os.path.join(lora_dir, 'params.json')
+    if not os.path.exists(params_path):
+        print(f'Can not find model params file {params_path!r}, aborting ...')
         return
 
     output_dir = os.path.dirname(save_path)
@@ -69,67 +83,80 @@ def merge_lora_checkpoint(
         # Create the output directory if necessary
         os.makedirs(output_dir, mode=0o777, exist_ok=True)
 
-    print('Loading model checkpoints ...')
+    print(f'Loading base model checkpoints {base_ckpt_path!r}...')
+    base_checkpoint = torch.load(base_ckpt_path)
 
-    # try to find and load pre-trained and lora checkpoints
-    checkpoints = sorted(Path(base_ckpt_dir).glob('*.pth'))
-    assert len(checkpoints) == 1, f'no checkpoint files found in {base_ckpt_dir}'
-    pretrained_ckpt_file = checkpoints[0]
-
-    pretrained_checkpoint = torch.load(pretrained_ckpt_file)
+    print(f'Loading LoRA model checkpoints {lora_ckpt_path!r}...')
     lora_checkpoint = torch.load(lora_ckpt_path)
 
-    # find the rank from LoRA checkpoint
-    rank = lora_model_lookup(lora_checkpoint)
+    with open(params_path, 'r') as f:
+        meta_params = json.load(f)
 
-    with lora(r=rank, alpha=lora_alpha, dropout=0.0, enabled=True):
-        model_args = ModelArgs.from_model_type(model_type)
+        del meta_params['quant_4bit']
+        del meta_params['quant_lora_4bit']
 
-        if is_reward_model:
-            model = RewardModel(model_args)
-        else:
-            model = Transformer(model_args)
+    model_args = LoraModelArgs(
+        **meta_params,
+        # No quantization during merge weights
+        quant_4bit=False,
+        quant_lora_4bit=False,
+    )
 
-        # 1. Load the pretrained weights
-        model.load_state_dict(pretrained_checkpoint, strict=False)
-        # 2. Load the fine-tuned lora weights
-        model.load_state_dict(lora_checkpoint, strict=False)
+    model = Transformer(model_args)
 
-    # convert to target dtype
-    model.to(dtype=dtype)
+    # 1. Load the pretrained weights
+    model.load_state_dict(base_checkpoint, strict=False)
+
+    # 2. Load the fine-tuned lora weights
+    model.load_state_dict(lora_checkpoint, strict=False)
+
+    # 3. merge LoRA weights, which was handled inside the LoRALinear.train() method
     model.eval()
 
+    # 4. optional, convert to bfloat16
+    convert_model_to_dtype(model, dtype)
+
+    # 5. Remove LoRA parameters from the model state
     state_dict = get_clean_state_dict(model)
 
-    print(f'Saving merged model weights to {save_path} ...')
+    print(f'Saving merged model weights to {save_path!r} ...')
     torch.save(state_dict, save_path)
 
-    print(f'Copying params.json to {output_dir}...')
-    shutil.copy(os.path.join(base_ckpt_dir, 'params.json'), output_dir)
+    meta_file = os.path.join(output_dir, 'params.json')
+    if not os.path.exists(meta_file):
+        del_keys = ('lora', 'quant', 'dropout')
+        meta = model.params.dict()
+        meta = {k: v for k, v in meta.items() if all([n not in k for n in del_keys])}
+
+        print(f'Saving model metadata to {meta_file!r} ...')
+        with open(meta_file, 'w', encoding='utf-8') as f:
+            json.dump(meta, f, indent=2)
 
 
 if __name__ == '__main__':
-    # # fine-tuned model
-    # merge_lora_checkpoint(
-    #     model_type='7B',
-    #     lora_ckpt_path='./checkpoints/train_sft_lora/lora_7B-iter-2000.pth',
-    #     base_ckpt_dir='./meta_checkpoints/llama-2/llama-2-7b/',
-    #     save_path='./checkpoints/7b-sft/iter-2000-merged.pth',
-    # )
+    # fine-tuned model
+    merge_lora_checkpoint(
+        base_ckpt_path='./meta_checkpoints/llama-2-7b/consolidated.pth',
+        lora_ckpt_path='./checkpoints/sft_lora/lora_7B-iter-600.pth',
+        save_path='./merged_checkpoints/7b-sft/iter-600-merged.pth',
+    )
 
-    # # RM model
-    # merge_lora_checkpoint(
-    #     model_type='7B',
-    #     lora_ckpt_path='./checkpoints/train_rm_lora/lora_7B-iter-2500.pth',
-    #     base_ckpt_dir='./checkpoints/7b-sft/',
-    #     save_path='./checkpoints/7b-rm/iter-2500-merged.pth',
-    #     is_reward_model=True
-    # )
+    # RM model
+    merge_lora_checkpoint(
+        base_ckpt_path='./merged_checkpoints/7b-sft/iter-600-merged.pth',
+        lora_ckpt_path='./checkpoints/rm_lora/lora_3B-iter-4300.pth',
+        save_path='./merged_checkpoints/3b-rm/iter-4300-merged.pth',
+    )
 
     # PPO model
     merge_lora_checkpoint(
-        model_type='7B',
-        lora_ckpt_path='./checkpoints/train_ppo_lora/lora_7B_policy-epoch-60.pth',
-        base_ckpt_dir='./checkpoints/7b-sft/',
-        save_path='./checkpoints/7b-ppo/policy-epoch-60-merged.pth',
+        base_ckpt_path='./merged_checkpoints/7b-sft/iter-600-merged.pth',
+        lora_ckpt_path='./checkpoints/rlhf_lora/policy/lora_7B_epoch-14.pth',
+        save_path='./merged_checkpoints/7b-rlhf/policy-epoch-14-merged.pth',
+    )
+
+    merge_lora_checkpoint(
+        base_ckpt_path='./merged_checkpoints/3b-rm/iter-4300-merged.pth',
+        lora_ckpt_path='./checkpoints/rlhf_lora/value/lora_3B_epoch-14.pth',
+        save_path='./merged_checkpoints/3b-rlhf/value-epoch-14-merged.pth',
     )

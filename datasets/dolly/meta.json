@@ -1,0 +1,9 @@
+{
+  "data_structure": "A list of prompt:completion token sequences pairs.",
+  "home_page": "https://www.databricks.com/blog/2023/04/12/dolly-first-open-commercially-viable-instruction-tuned-llm",
+  "language": "English",
+  "name": "Dolly",
+  "num_train_samples": 13042,
+  "num_validation_samples": 686,
+  "vocab_size": 32000
+}

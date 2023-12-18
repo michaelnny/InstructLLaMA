@@ -1,10 +1,15 @@
+# Copyright (c) 2023 Michael Hu.
+# This project is released under the MIT License.
+# See the accompanying LICENSE file for details.
+
+
 import torch
 
 
 class RunningMeanStd:
-    def __init__(self, shape=()):
-        self.mean = torch.zeros(shape, dtype=torch.float32)
-        self.var = torch.ones(shape, dtype=torch.float32)
+    def __init__(self, shape=(), device='cpu'):
+        self.mean = torch.zeros(shape, dtype=torch.float32, device=device)
+        self.var = torch.ones(shape, dtype=torch.float32, device=device)
         self.count = 0
 
         self.deltas = []
@@ -37,3 +42,11 @@ class RunningMeanStd:
                 return (x - self.mean.to(x.device)) / torch.sqrt(self.var.to(x.device))
             else:
                 return (x) / torch.sqrt(self.var.to(x.device))
+
+    def state_dict(self):
+        return {'mean': self.mean, 'var': self.var, 'count': self.count}
+
+    def load_state_dict(self, state_dict):
+        self.mean = state_dict['mean']
+        self.var = state_dict['var']
+        self.count = state_dict['count']
