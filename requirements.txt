@@ -6,7 +6,7 @@ numpy
 tensorboard
 torch_tb_profiler==0.4.1
 
-bitsandbytes # 4bit quantization
+bitsandbytes==0.41.3 # 4bit quantization
 
 # preparing and building datasets
 pyarrow

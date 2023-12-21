@@ -32,6 +32,8 @@ class PromptEnv:
         self.dataset = prompt_dataset
         self.reward_model = reward_model.eval().to(device)
         self.sft_model = sft_model.eval().to(device)
+        self.reward_model.disable_cache()
+        self.sft_model.disable_cache()
 
         self.normalize_reward = normalize_reward
         self.clip_reward_fn = clip_reward_fn

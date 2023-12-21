@@ -37,30 +37,38 @@ from instruct_llama.utils.prompt_builder import (
 class Llama:
     @staticmethod
     def build(
-        ckpt_dir: str,
+        ckpt_path: str,
         tokenizer_path: str,
         max_seq_len: int,
         max_batch_size: int,
         device: str,
+        seed: int = 1,
     ) -> 'Llama':
-        print('Starting to load model and tokenizer checkpoints ...')
+        if not os.path.exists(ckpt_path):
+            raise ValueError(f'Checkpoint file {ckpt_path!r} does not exist, aborting ...')
+        ckpt_dir = os.path.dirname(ckpt_path)
+
+        params_path = os.path.join(ckpt_dir, 'params.json')
+        if not os.path.exists(params_path):
+            raise ValueError(f'Can not find model metadata file {params_path!r}, aborting ...')
+
+        print(f'Starting to load model checkpoints {ckpt_path!r} ...')
+
+        torch.manual_seed(seed)
         torch.set_default_device(device)
+        torch.set_default_dtype(torch.float16)
 
-        # seed must be the same in all processes
-        torch.manual_seed(1)
-
-        start_time = time.time()
-        checkpoints = sorted(Path(ckpt_dir).glob('*.pth'))
-        assert len(checkpoints) == 1, f'no checkpoint files found in {ckpt_dir}'
-
-        ckpt_path = checkpoints[0]
+        t0 = time.time()
         checkpoint = torch.load(ckpt_path, map_location='cpu')
-        with open(Path(ckpt_dir) / 'params.json', 'r') as f:
+        with open(params_path, 'r') as f:
             params = json.loads(f.read())
 
+        try:
             del params['max_seq_len']
             del params['max_batch_size']
             del params['use_cache']
+        except Exception:
+            pass
 
         model_args: ModelArgs = ModelArgs(
             **params,
@@ -68,13 +76,15 @@ class Llama:
             max_batch_size=max_batch_size,
             use_cache=True,
         )
-        tokenizer = Tokenizer(model_path=tokenizer_path)
-        model_args.vocab_size = tokenizer.vocab_size
 
-        torch.set_default_dtype(torch.float16)
         model = Transformer(model_args)
         model.load_state_dict(checkpoint, strict=False)
-        print(f'Loaded in {time.time() - start_time:.2f} seconds')
+
+        print(f'Model checkpoint loaded in {time.time() - t0:.2f} seconds')
+
+        print(f'Starting to load tokenizer checkpoint {tokenizer_path!r} ...')
+        tokenizer = Tokenizer(model_path=tokenizer_path)
+        model_args.vocab_size = tokenizer.vocab_size
 
         for params in model.parameters():
             params.requires_grad = False

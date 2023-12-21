@@ -14,11 +14,11 @@ wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 
 
-from instruct_llama.utils import Llama
+from instruct_llama.generation import Llama
 
 
 def main(
-    ckpt_dir: str,
+    ckpt_path: str,
     tokenizer_path: str,
     temperature: float = 0.6,
     top_p: float = 0.9,
@@ -27,7 +27,7 @@ def main(
     max_batch_size: int = 4,
 ):
     generator = Llama.build(
-        ckpt_dir=ckpt_dir,
+        ckpt_path=ckpt_path,
         tokenizer_path=tokenizer_path,
         max_seq_len=max_seq_len,
         max_batch_size=max_batch_size,
@@ -65,6 +65,6 @@ def main(
 
 if __name__ == '__main__':
     main(
-        ckpt_dir='./meta_checkpoints/llama-2-7b/',
+        ckpt_path='./meta_checkpoints/llama-2-7b/consolidated.pth',
         tokenizer_path='./checkpoints/tokenizer.model',
     )

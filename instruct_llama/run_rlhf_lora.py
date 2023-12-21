@@ -262,6 +262,9 @@ class PPOAgent:
         self.value_optimizer = value_optimizer
         self.value_scheduler = value_scheduler
         self.value_grad_clip = value_grad_clip
+
+        self.policy_model.disable_cache()
+        self.value_model.disable_cache()
         self.model_params = self.policy_model.params
 
         self.update_epochs = update_epochs
@@ -344,6 +347,8 @@ class PPOAgent:
         assert batch_size >= 4
         assert max_gen_len >= 12
 
+        self.policy_model.enable_cache()
+
         # randomly sample a batch of prompts
         prompt_tokens = env.reset(batch_size)
 
@@ -367,8 +372,6 @@ class PPOAgent:
         eos_reached = torch.tensor([False] * bsz, device='cuda')
         input_text_mask = tokens != pad_id
 
-        logprobs = torch.zeros((bsz, total_len), dtype=torch.float, device='cuda')
-
         # RL agent starts selfplay
         for cur_pos in range(min_prompt_len, total_len):
             output = self.policy_model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
@@ -384,40 +387,30 @@ class PPOAgent:
             # only replace token if prompt has already been generated
             next_token = torch.where(input_text_mask[:, cur_pos], tokens[:, cur_pos], next_token)
             tokens[:, cur_pos] = next_token
-
             eos_reached |= (~input_text_mask[:, cur_pos]) & (next_token == eos_id)
-
-            # store chosen action, action log probability, and the state values
-            # we use cur_pos-1 because cur_pos is actually pointing to next token, not current one
-            insert_idx = cur_pos - 1
-            pi_dist = Categorical(logits=logits)
-            next_token_logprobs = pi_dist.log_prob(next_token)
-            next_token_logprobs = torch.where(input_text_mask[:, cur_pos], logprobs[:, insert_idx], next_token_logprobs)
-            logprobs[:, insert_idx] = next_token_logprobs
-
             prev_pos = cur_pos
             if all(eos_reached):
                 break
 
         # start post-episode processing
-        start_steps = torch.tensor([len(prompts) for prompts in prompt_tokens], dtype=torch.long, device='cuda')
+        start_steps = torch.zeros((bsz,), dtype=torch.long, device='cuda')
         terminal_steps = torch.zeros((bsz,), dtype=torch.long, device='cuda')
 
         # cut tokens to:
         # a. maximum generation length
         # b. eos token
-        # c. begin of instruction token [INST]
-
         for i, toks in enumerate(tokens.tolist()):
             start = len(prompt_tokens[i])
-            toks = toks[start : start + max_gen_len]
+            start_steps[i] = start
+            _toks = toks[start : start + max_gen_len]
 
             # cut to max gen len, -1 to avoid out of index
             end_idx = min(start + max_gen_len, total_len) - 1
 
             # cut to eos token </eos>
-            if eos_id in toks:
-                end_idx = start + toks.index(eos_id)
+            if eos_id in _toks:
+                end_idx = start + _toks.index(eos_id)
+                assert toks[end_idx] == eos_id
             # else:
             #     # cut to begin of instruction token [INST]
             #     begin_inst_idx = find_begin_of_inst_index(toks)
@@ -436,17 +429,23 @@ class PPOAgent:
         #   [-1, -1] are padding tokens
         #
         # then the mask will be:
-        # [False, False, False, True, True, True, False, False, False]
+        # [False, False, False, False, True, True, True, False, False]
         mask = torch.zeros_like(tokens, dtype=torch.bool, device='cpu')
 
         for i, (start_idx, end_idx) in enumerate(zip(start_steps.tolist(), terminal_steps.tolist())):
-            mask[i, start_idx - 1 : end_idx] = True
-            tokens[i, end_idx:] = eos_id
-            # logprobs[i, end_idx + 1 :] = torch.tensor(0.7).log()  # this does not matter as they are ignore by the mask
+            mask[i, start_idx : end_idx + 1] = True
+            tokens[i, end_idx + 1 :] = eos_id  # replace pad_id
 
-        # shift one step to left to get the actions taken by the agent, this aligns with the RL transition convention: (s, a, prob_a)
-        actions = torch.full((bsz, total_len), eos_id, dtype=torch.long, device='cpu')
-        actions[:, :-1] = tokens[:, 1:].cpu()
+        # shift one step to left to get the actions taken by the agent, this aligns with the RL transition convention: (s, a, logprob_a)
+        actions = torch.full((bsz, total_len), eos_id, dtype=torch.long, device='cuda')
+        actions[:, :-1] = tokens[:, 1:]
+
+        # compute log probability for actions
+        self.policy_model.disable_cache()
+        output = self.policy_model.forward(tokens)
+        pi_dist = Categorical(logits=output)
+        logprobs = pi_dist.log_prob(actions)
+        logprobs *= mask.float().cuda()
 
         # Compute environment reward
         env_rewards, normed_env_rewards = env.step(tokens, terminal_steps)
@@ -456,7 +455,7 @@ class PPOAgent:
         if self.clip_kl > 0:
             kl = torch.clamp(kl, min=-self.clip_kl, max=self.clip_kl)
 
-        # Add environment reward and KL penalties together
+        # Combine environment reward and KL penalties together
         rewards = torch.zeros_like(tokens, dtype=torch.float, device=kl.device)
         for i, idx in enumerate(terminal_steps.tolist()):
             rewards[i, idx] = normed_env_rewards[i]
@@ -600,6 +599,7 @@ class PPOAgent:
         if self.policy_device == self.value_device:
             self.value_model.to('cpu')
 
+        self.policy_model.disable_cache()
         self.policy_model.to(self.policy_device)
         self.policy_model.train()
 
@@ -623,6 +623,7 @@ class PPOAgent:
         if self.policy_device == self.value_device:
             self.policy_model.to('cpu')
 
+        self.value_model.disable_cache()
         self.value_model.to(self.value_device)
         self.value_model.train()
 
@@ -838,20 +839,18 @@ class PPOAgent:
 
         for episode in episodes:
             mask = episode['mask']
-            kl = episode['kl']
-            rewards = episode['rewards']
-            env_reward = episode['env_rewards']
-            normed_env_reward = episode['normed_env_rewards']
-            start_t = episode['start_step']
-            end_t = episode['terminal_steps']
-
             stats = {
-                'steps': (end_t - start_t).item(),
-                'env_reward': env_reward.item(),
-                'normed_env_reward': normed_env_reward.item(),
-                'reward': masked_sum(rewards, mask, 0).item(),
-                'kl': masked_sum(kl, mask, 0).item(),
+                'steps': (episode['terminal_steps'] - episode['start_step']).item(),
+                'env_reward': episode['env_rewards'].item(),
+                'normed_env_reward': episode['normed_env_rewards'].item(),
+                'combined_reward': masked_sum(episode['rewards'], mask, 0).item(),
+                'kl': masked_sum(episode['kl'], mask, 0).item(),
             }
+
+            if is_training:
+                stats['returns'] = masked_mean(episode['returns'], mask, 0).item()
+                stats['advantages'] = masked_mean(episode['advantages'], mask, 0).item()
+
             episodes_stats.append(stats)
 
             if is_training:
@@ -866,7 +865,7 @@ class PPOAgent:
                     if isinstance(v, (int, float)):
                         self.tb_writer.add_scalar(f'{episode_prefix}/{k}', v, episode_count)
 
-        episodes_reward = [s['reward'] for s in episodes_stats]
+        episodes_combined_reward = [s['combined_reward'] for s in episodes_stats]
         episodes_env_reward = [s['env_reward'] for s in episodes_stats]
         episodes_normed_env_reward = [s['normed_env_reward'] for s in episodes_stats]
         episodes_kl = [s['kl'] for s in episodes_stats]
@@ -874,15 +873,19 @@ class PPOAgent:
 
         aggregated_stats = {
             'env_reward_mean': np.mean(episodes_env_reward),
-            'env_reward_std': np.std(episodes_env_reward),
+            # 'env_reward_std': np.std(episodes_env_reward),
             'normed_env_reward_mean': np.mean(episodes_normed_env_reward),
-            'normed_env_reward_std': np.std(episodes_normed_env_reward),
+            # 'normed_env_reward_std': np.std(episodes_normed_env_reward),
             'kl_mean': np.mean(episodes_kl),
-            'kl_std': np.std(episodes_kl),
-            'reward_mean': np.mean(episodes_reward),
-            'reward_std': np.std(episodes_reward),
+            # 'kl_std': np.std(episodes_kl),
+            'combined_reward_mean': np.mean(episodes_combined_reward),
+            'combined_reward_std': np.std(episodes_combined_reward),
             'episode_steps': np.mean(episodes_steps),
         }
+
+        if is_training:
+            aggregated_stats['returns_mean'] = np.mean([s['returns'] for s in episodes_stats])
+            aggregated_stats['advantages_mean'] = np.mean([s['advantages'] for s in episodes_stats])
 
         prefix = 'Train epoch self-play statistics' if is_training else 'Validation epoch self-play statistics'
         logger.info(f'{prefix}: {aggregated_stats}')
@@ -954,7 +957,7 @@ def main():
 
     train_ptx_loader = DataLoader(train_ptx_dataset, **cuda_kwargs)
 
-    logger.info(f'Train PTX dataset metadata:\n{train_ptx_dataset.get_metadata()}')
+    logger.info(f'PTX pretrain dataset metadata:\n{train_ptx_dataset.get_metadata()}')
 
     train_prompt_dataset = PromptOnlyDataset(
         data_sources=cfg.train_prompt_datasources,
@@ -977,8 +980,6 @@ def main():
     logger.info(f'Validation prompt dataset metadata:\n{val_prompt_dataset.get_metadata()}')
 
     # --------------- Setup model and optimizer ---------------
-
-    logger.info('Initializing model and optimizer ...')
 
     compute_dtype = torch.bfloat16
 
@@ -1020,7 +1021,7 @@ def main():
         device=cfg.env_device,
     )
 
-    logger.info('Initializing policy and value models ...')
+    logger.info('Initializing PPO policy and value models ...')
 
     # Load model checkpoint using strict=False,
     # because there are missing keys due to LoRA weights not contained in checkpoint state
@@ -1119,8 +1120,8 @@ def main():
 
     os.makedirs(cfg.log_dir, exist_ok=True)
     os.makedirs(cfg.ckpt_dir, exist_ok=True)
-    os.makedirs(cfg.ckpt_dir + '/policy', exist_ok=True)
-    os.makedirs(cfg.ckpt_dir + '/value', exist_ok=True)
+    os.makedirs(os.path.join(cfg.ckpt_dir, 'policy'), exist_ok=True)
+    os.makedirs(os.path.join(cfg.ckpt_dir, 'value'), exist_ok=True)
 
     for epoch in range(1, num_epochs + 1):
         logger.info(f'Epoch {epoch}')
@@ -1147,7 +1148,6 @@ def main():
         logger.info(f'Starting to train the agent using {len(transitions)} selfplay episodes ...')
         ppo_agent.run_ppo_training_steps(transitions=transitions)
 
-        # poor solution to swap model between devices, so the training can run without CUDA OOM
         if cfg.env_device != 'cpu' and cfg.env_device == cfg.policy_device or cfg.env_device == cfg.value_device:
             reward_model.to(cfg.env_device)
             sft_model.to(cfg.env_device)

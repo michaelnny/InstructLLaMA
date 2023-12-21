@@ -28,11 +28,10 @@ class config:
 
     sft_ckpt_file: str = './merged_checkpoints/7b-sft/iter-600-merged.pth'  # load fine-tuned checkpoint
     rm_ckpt_file: str = './merged_checkpoints/3b-rm/iter-4300-merged.pth'  # load RM checkpoint
-    rm_norm_ckpt_file: str = (
-        './merged_checkpoints/3b-rm/normalizer_3B-iter-4300.pth'  # load RM statistics normalizer checkpoint
-    )
+    rm_norm_ckpt_file: str = './merged_checkpoints/3b-rm/normalizer_3B-iter-4300.pth'  # load RM normalizer checkpoint
     policy_ckpt_file: str = './merged_checkpoints/7b-sft/iter-600-merged.pth'  # default same as fine-tuned checkpoint
     value_ckpt_file: str = './merged_checkpoints/3b-rm/iter-4300-merged.pth'  # default same as RM checkpoint
+
     tokenizer_file: str = './meta_checkpoints/tokenizer.model'  # load tokenizer model
 
     # datasets
@@ -67,7 +66,7 @@ class config:
     policy_device: str = 'cuda:0'  # policy model
     value_device: str = 'cuda:0'  # value model
 
-    # RL actor selfplay
+    # RL agent selfplay
     selfplay_batch_size: int = 32  # how many prompts to work on during selfplay to generate training samples
     train_temperature: float = 1.0
     train_top_p: float = 1.0
@@ -76,7 +75,7 @@ class config:
     min_gen_len: int = 6  # episode with completion tokens lesser than this are discarded
     selfplay_log_interval: int = 20  # log episode metrics (reward, steps etc.)
     normalize_env_rewards: bool = True
-    clip_env_reward: float = 1.0  # clip (normalize) environment reward in the range of [-max_abs_reward, max_abs_reward]
+    clip_env_reward: float = 1.0  # clip (normalized) environment reward in the range of [-max_abs_reward, max_abs_reward]
 
     # PPO learning
     max_episodes: int = int(1e6)  # total number of training episodes
@@ -88,18 +87,19 @@ class config:
     discount: float = 1.0
     gae_lambda: float = 0.95
     policy_clip_eps: float = 0.2
-    value_clip_eps: float = 0.2
     entropy_coef: float = 0.0
-    ptx_coef: float = 0.01
+    whiten_advantages: bool = True
+
+    # InstructGPT specific
+    value_clip_eps: float = 0.2
+    ptx_coef: float = 0.05
     kl_coef: float = 0.02
-    clip_kl: float = 0.0  # clip per-token KL penalties in the range of [-max_abs_kl, max_abs_kl]
+    clip_kl: float = 0.25  # clip per-token KL penalties in the range of [-max_abs_kl, max_abs_kl]
+    whiten_rewards: bool = True
 
     # validation
     var_interval: int = 5
     val_episodes_per_epoch: int = 128
-
-    whiten_rewards: bool = True
-    whiten_advantages: bool = True
 
     # LoRA configuration
     lora_r: int = 64
@@ -129,17 +129,19 @@ class config:
     adam_eps: float = 1e-5
     adam_fused: bool = False  # only applicable if not using bitsandbytes optimizer
 
-    policy_init_lr: float = 1e-6  # initial learning rate
-    policy_max_lr: float = 5e-6  # max learning rate after warm up
-    policy_min_lr: float = 1e-6  # min learning rate after decay
+    # PPO policy model
+    policy_init_lr: float = 5e-6  # initial learning rate
+    policy_max_lr: float = 1e-5  # max learning rate after warm up
+    policy_min_lr: float = 5e-6  # min learning rate after decay
     policy_warmup_steps: int = 100
-    policy_grad_clip: float = 2.0
+    policy_grad_clip: float = 5.0
 
-    value_init_lr: float = 1e-5
-    value_max_lr: float = 2e-5
-    value_min_lr: float = 5e-6
+    # PPO value model
+    value_init_lr: float = 2e-5  # initial learning rate
+    value_max_lr: float = 5e-5  # max learning rate after warm up
+    value_min_lr: float = 2e-5  # min learning rate after decay
     value_warmup_steps: int = 100
-    value_grad_clip: float = 20.0
+    value_grad_clip: float = 0.0
 
     # dropout regularization
     embed_dropout: float = 0.0
