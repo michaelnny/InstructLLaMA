@@ -5,7 +5,7 @@ Implements pre-training, supervised fine-tuning (SFT), and reinforcement learnin
 This project use a custom QLoRA implementation with basic tools such as PyTorch and Bitsandbytes, without any Hugging Face tools.
 
 For more information on QLoRA fine-tuning, check my project at
-[QLoRA-LLM] (https://github.com/michaelnny/QLoRA-LLM)
+[QLoRA-LLM](https://github.com/michaelnny/QLoRA-LLM)
 
 # Disclaimer
 
@@ -56,7 +56,7 @@ python3 -m pip install -r requirements.txt
 
 Here are the steps required to utilize the project:
 
-1. **Download the pre-trained model weights** please refer to https://github.com/Metaresearch/llama on how to download it.
+1. **Download the pre-trained model weights** please refer to https://github.com/facebookresearch/llama on how to download it.
 2. **Convert Meta's pre-trained model weights** so it's compatible with our naming convention. Remember to change the file path before running it.
 
 ```
@@ -233,13 +233,13 @@ tensorboard --logdir=./logs
 This project is licensed under the MIT License (the "License")
 see the LICENSE file for details
 
-The LLaMA2 model weights are licensed for both researchers and commercial entities. For details, visit: https://github.com/Metaresearch/llama#license.
+The LLaMA2 model weights are licensed for both researchers and commercial entities. For details, visit: https://github.com/facebookresearch/llama#license.
 
 # Acknowledgments
 
 This project is greatly influenced by the following projects:
 
-- [Llama 2] (https://github.com/Metaresearch/llama)
+- [Llama 2] (https://github.com/facebookresearch/llama)
 - [lm-human-preferences] (https://github.com/openai/lm-human-preferences)
 - [Lit-LLaMA] (https://github.com/Lightning-AI/lit-llama)
 - [LoRA] (https://github.com/microsoft/LoRA)
