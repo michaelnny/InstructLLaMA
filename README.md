@@ -2,9 +2,9 @@
 
 Implements pre-training, supervised fine-tuning (SFT), and reinforcement learning from human feedback (RLHF), to train and fine-tune the LLaMA2 model to follow human instructions, similar to InstructGPT or ChatGPT, but on a much smaller scale.
 
-This project use a custom QLoRA implementation with basic tools such as PyTorch and Bitsandbytes, without any Hugging Face tools.
+Check the [article post](https://www.vectortheta.com/blog/InstructLLaMA) on the discussion of the project.
 
-For more information on QLoRA fine-tuning, check my project at
+This project use a custom QLoRA implementation with basic tools such as PyTorch and Bitsandbytes, decoupled from any Hugging Face tools. For more information on QLoRA fine-tuning, check my [article post](https://www.vectortheta.com/blog/QLoRA-LLM) and project at
 [QLoRA-LLM](https://github.com/michaelnny/QLoRA-LLM)
 
 # Disclaimer
@@ -184,8 +184,11 @@ The goal of this stage is to train the policy model so that we can get higher re
 
 ```
 while not converged:
-  using a prompt only datasets and RL self-play to generate a large batch of L sample completions when following the policy model.
-  for each of the completion, use the RM model to assign a reward signal to it. Additionally, use the SFT model to compute a pre-token KL penalty as part of the reward signal, so hopefully the policy don't diverge too much from the SFT model.
+  use a prompt only datasets and RL self-play to generate a large batch of L sample episodes
+
+  for each episode in L:
+    use the RM model to assign a reward signal according to the completion tokens.
+    use the SFT model to compute a pre-token KL penalty for the completion tokens as part of the reward signal
 
   for each PPO training epoch:
     using PPO to update the policy and value networks based on the L samples
@@ -223,10 +226,14 @@ tensorboard --logdir=./logs
 **QLoRA RM**
 ![RM Tensorboard](/images/tensorboard_rm_lora.png)
 
-**QLoRA RLHF PPO - self-play epochs**
-![RLHF PPO Tensorboard](/images/tensorboard_rlhf_lora_01.png)
-**QLoRA RLHF PPO - train policy**
-![RLHF PPO Tensorboard](/images/tensorboard_rlhf_lora_02.png)
+**QLoRA RLHF PPO - train self-play epochs** (1 epoch = 1024 episodes)
+![RLHF PPO Tensorboard](/images/tensorboard_rlhf_lora_train_epochs.png)
+
+**QLoRA RLHF PPO - validation self-play epochs** (1 epoch = 128 episodes)
+![RLHF PPO Tensorboard](/images/tensorboard_rlhf_lora_val_epochs.png)
+
+**QLoRA RLHF PPO - train PPO policy**
+![RLHF PPO Tensorboard](/images/tensorboard_rlhf_lora_train_ppo_policy.png)
 
 # License
 

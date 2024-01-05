@@ -56,8 +56,8 @@ class config:
     val_prompt_datasources: Tuple[str] = ('./datasets/hh-rlhf_prompt_only/validation.pkl',)
 
     dataloader_workers: int = 1
-    max_train_samples: int = 50000  # limit the amount of sample prompts to train the agent
-    max_val_samples: int = 2000  # limit the amount of sample prompts to validate the agent
+    max_train_samples: int = 100000  # limit the amount of sample prompts to train the agent
+    max_val_samples: int = 5000  # limit the amount of sample prompts to validate the agent
     min_prompt_len: int = 12  # limit the minimum length of prompts in the prompt dataset
     max_prompt_len: int = 200  # limit the maximum length of prompts in the prompt dataset
 
@@ -79,23 +79,23 @@ class config:
 
     # PPO learning
     max_episodes: int = int(1e6)  # total number of training episodes
-    train_episodes_per_epoch: int = 512  # how many training selfplay episodes to run per epoch
+    train_episodes_per_epoch: int = 1024  # how many training selfplay episodes to run per epoch
     micro_batch_size: int = 2
     gradient_accum_steps: int = 32
     train_log_interval: int = 10  # log training metrics (loss etc.)
-    update_epochs: int = 3  # PPO update epoch
+    update_epochs: int = 4  # PPO update epoch
     discount: float = 1.0
     gae_lambda: float = 0.95
     policy_clip_eps: float = 0.2
     entropy_coef: float = 0.0
-    whiten_advantages: bool = True
+    normalize_advantages: bool = True
 
     # InstructGPT specific
-    value_clip_eps: float = 0.2
-    ptx_coef: float = 0.05
+    value_clip_eps: float = 0.0
+    ptx_coef: float = 0.0
     kl_coef: float = 0.02
-    clip_kl: float = 0.25  # clip per-token KL penalties in the range of [-max_abs_kl, max_abs_kl]
-    whiten_rewards: bool = True
+    clip_kl: float = 0.2  # clip per-token KL penalties in the range of [-max_abs_kl, max_abs_kl]
+    normalize_rewards: bool = False
 
     # validation
     var_interval: int = 5

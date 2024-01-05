@@ -155,39 +155,40 @@ def split_indices_into_bins(
 
 
 def masked_mean(tensor: torch.Tensor, mask: torch.Tensor, dim: int = 1) -> torch.Tensor:
-    tensor = tensor * mask
-    tensor = tensor.sum(dim=dim)
+    masked_tensor = tensor * mask
+    tensor_sum = masked_tensor.sum(dim=dim)
     mask_sum = mask.sum(dim=dim)
 
-    # avoid division by zero
+    # Avoid division by zero
     mask_sum = torch.where(mask_sum <= 0, 1e-8, mask_sum)
 
-    mean = tensor / mask_sum
+    mean = tensor_sum / mask_sum
     return mean
 
 
 def masked_sum(tensor: torch.Tensor, mask: torch.Tensor, dim: int = 1) -> torch.Tensor:
-    tensor = tensor * mask
-    sum = tensor.sum(dim=dim)
-    return sum
+    masked_tensor = tensor * mask
+    tensor_sum = masked_tensor.sum(dim=dim)
+    return tensor_sum
 
 
 def masked_whiten(
     tensor: torch.Tensor, mask: torch.Tensor, dim: int = 1, eps: float = 1e-8, shift_mean: bool = True
 ) -> torch.Tensor:
-    tensor = tensor * mask
-    mean = masked_mean(tensor, mask, dim=dim)
+    masked_tensor = tensor * mask
+    mean = masked_mean(masked_tensor, mask, dim=dim)
 
     if len(tensor.shape) > len(mean.shape) and len(mean.shape) == 1:
         mean = mean.unsqueeze(1)
 
-    mean_centered = tensor - mean
+    mean_centered = masked_tensor - mean
 
     var = masked_mean(mean_centered**2, mask, dim=dim)
     if len(tensor.shape) > len(var.shape) and len(var.shape) == 1:
         var = var.unsqueeze(1)
 
-    var = torch.where(var == 0, 1.0, var)
+    # Avoid potential division by zero
+    var = torch.where(var <= 0, eps, var)
 
     whitened = mean_centered * var.clamp(min=eps).rsqrt()
 

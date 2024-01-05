@@ -113,6 +113,6 @@ if __name__ == '__main__':
     main(
         # ckpt_path="./meta_checkpoints/llama-2/llama-2-7b-chat/consolidated.pth",  # Meta fine-tuned chat model
         # ckpt_path='./merged_checkpoints/7b-sft/iter-600-merged.pth',  # our fine-tuned chat model
-        ckpt_path='./merged_checkpoints/7b-rlhf/policy-epoch-24-merged.pth',  # our RL trained chat model
+        ckpt_path='./merged_checkpoints/7b-rlhf/policy-epoch-40-merged.pth',  # our RL trained chat model
         tokenizer_path='./meta_checkpoints/tokenizer.model',
     )

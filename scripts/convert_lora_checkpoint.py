@@ -151,12 +151,12 @@ if __name__ == '__main__':
     # PPO models
     merge_lora_checkpoint(
         base_ckpt_path='./merged_checkpoints/7b-sft/iter-600-merged.pth',
-        lora_ckpt_path='./checkpoints/rlhf_lora/policy/lora_7B-epoch-24.pth',
-        save_path='./merged_checkpoints/7b-rlhf/policy-epoch-24-merged.pth',
+        lora_ckpt_path='./checkpoints/rlhf_lora/policy/lora_7B-epoch-40.pth',
+        save_path='./merged_checkpoints/7b-rlhf/policy-epoch-40-merged.pth',
     )
 
     merge_lora_checkpoint(
         base_ckpt_path='./merged_checkpoints/3b-rm/iter-4300-merged.pth',
-        lora_ckpt_path='./checkpoints/rlhf_lora/value/lora_3B-epoch-24.pth',
-        save_path='./merged_checkpoints/3b-rlhf/value-epoch-24-merged.pth',
+        lora_ckpt_path='./checkpoints/rlhf_lora/value/lora_3B-epoch-40.pth',
+        save_path='./merged_checkpoints/3b-rlhf/value-epoch-40-merged.pth',
     )

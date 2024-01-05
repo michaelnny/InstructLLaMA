@@ -300,8 +300,8 @@ class PPOAgent:
         top_p: float,
         min_gen_len: int,
         max_gen_len: int,
-        whiten_rewards: bool,
-        whiten_advantages: bool = False,
+        normalize_rewards: bool,
+        normalize_advantages: bool = False,
         is_training: bool = False,
     ):
         self.policy_model.eval()
@@ -312,7 +312,9 @@ class PPOAgent:
         t0 = time.time()
 
         while episode_c < num_episodes:
-            episodes = self.generate_batch_selfplay_episodes(env, batch_size, temperature, top_p, max_gen_len, whiten_rewards)
+            episodes = self.generate_batch_selfplay_episodes(
+                env, batch_size, temperature, top_p, max_gen_len, normalize_rewards
+            )
             batched_episodes.append(episodes)
             episode_c += len(episodes['terminal_steps'])
 
@@ -325,7 +327,7 @@ class PPOAgent:
 
         t1 = time.time()
         ppo_transitions = self.get_ppo_transitions_from_batched_episodes(
-            batched_episodes, min_gen_len, whiten_advantages, is_training
+            batched_episodes, min_gen_len, normalize_advantages, is_training
         )
 
         total_build_time = time.time() - t1
@@ -340,7 +342,7 @@ class PPOAgent:
 
     @torch.no_grad()
     def generate_batch_selfplay_episodes(
-        self, env: PromptEnv, batch_size: int, temperature: float, top_p: float, max_gen_len: int, whiten_rewards: bool
+        self, env: PromptEnv, batch_size: int, temperature: float, top_p: float, max_gen_len: int, normalize_rewards: bool
     ) -> Mapping[Text, torch.Tensor]:
         """Run one batch episodes, where the code is adapted from the generation.py module,
         here we also store the intermediate transitions which are required to train the model using the PPO algorithm"""
@@ -392,7 +394,9 @@ class PPOAgent:
             if all(eos_reached):
                 break
 
-        # start post-episode processing
+        # start post-selfplay processing
+        self.policy_model.disable_cache()
+
         start_steps = torch.zeros((bsz,), dtype=torch.long, device='cuda')
         terminal_steps = torch.zeros((bsz,), dtype=torch.long, device='cuda')
 
@@ -441,7 +445,6 @@ class PPOAgent:
         actions[:, :-1] = tokens[:, 1:]
 
         # compute log probability for actions
-        self.policy_model.disable_cache()
         output = self.policy_model.forward(tokens)
         pi_dist = Categorical(logits=output)
         logprobs = pi_dist.log_prob(actions)
@@ -463,7 +466,7 @@ class PPOAgent:
         rewards -= kl
         rewards *= mask.float().to(kl.device)
 
-        if whiten_rewards:
+        if normalize_rewards:
             rewards = masked_whiten(rewards.cpu(), mask.cpu(), shift_mean=False)
 
         episodes = {
@@ -486,7 +489,7 @@ class PPOAgent:
         self,
         batched_episodes: List[Mapping[Text, torch.Tensor]],
         min_gen_len: int,
-        whiten_advantages: bool,
+        normalize_advantages: bool,
         is_training: bool = False,
     ) -> Tuple[List[Mapping[Text, torch.Tensor]]]:
         if is_training:
@@ -495,7 +498,7 @@ class PPOAgent:
         episodes = self.flatten_batched_episodes(batched_episodes, min_gen_len)
 
         if is_training:
-            episodes = self.compute_masked_returns_and_advantages(episodes, whiten_advantages)
+            episodes = self.compute_masked_returns_and_advantages(episodes, normalize_advantages)
 
         return episodes
 
@@ -516,13 +519,14 @@ class PPOAgent:
 
     @torch.no_grad()
     def compute_masked_returns_and_advantages(
-        self, episodes: List[Mapping[Text, torch.Tensor]], whiten_advantages: bool
+        self, episodes: List[Mapping[Text, torch.Tensor]], normalize_advantages: bool
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         results = []
 
         for episode in episodes:
             values = episode['values']
             rewards = episode['rewards']
+            mask = episode['mask']
 
             r_t = rewards
             v_t = values
@@ -537,12 +541,11 @@ class PPOAgent:
             adv_t = truncated_generalized_advantage_estimation(r_t, v_t, v_tp1, discount_tp1, self.gae_lambda)
             return_t = adv_t + v_t
 
-            if whiten_advantages:
-                mask = episode['mask']
+            if normalize_advantages:
                 adv_t = masked_whiten(adv_t, mask, dim=0, shift_mean=True)
 
-            episode['returns'] = return_t
-            episode['advantages'] = adv_t
+            episode['returns'] = return_t * mask.float()
+            episode['advantages'] = adv_t * mask.float()
             results.append(episode)
 
         return results
@@ -775,6 +778,7 @@ class PPOAgent:
 
             assert pred_values.shape == returns.shape
 
+            # Why doing this clipping? Is this really necessary?
             # https://github.com/openai/lm-human-preferences/blob/cbfd210bb8b08f6bc5c26878c10984b90f516c66/lm_human_preferences/train_policy.py#L343C38-L347
             if self.value_clip_eps > 0:
                 pred_values_clipped = torch.clamp(pred_values, values - self.value_clip_eps, values + self.value_clip_eps)
@@ -833,8 +837,8 @@ class PPOAgent:
         if is_training:
             self.c_epoch += 1
 
-        episode_prefix = 'train_episodes' if is_training else 'val_episodes'
-        epoch_prefix = 'train_epochs' if is_training else 'val_epochs'
+        episode_prefix = 'selfplay_episodes_train' if is_training else 'selfplay_episodes_val'
+        epoch_prefix = 'selfplay_epochs_train' if is_training else 'selfplay_epochs_val'
         episodes_stats = []
 
         for episode in episodes:
@@ -873,11 +877,11 @@ class PPOAgent:
 
         aggregated_stats = {
             'env_reward_mean': np.mean(episodes_env_reward),
-            # 'env_reward_std': np.std(episodes_env_reward),
+            'env_reward_std': np.std(episodes_env_reward),
             'normed_env_reward_mean': np.mean(episodes_normed_env_reward),
-            # 'normed_env_reward_std': np.std(episodes_normed_env_reward),
+            'normed_env_reward_std': np.std(episodes_normed_env_reward),
             'kl_mean': np.mean(episodes_kl),
-            # 'kl_std': np.std(episodes_kl),
+            'kl_std': np.std(episodes_kl),
             'combined_reward_mean': np.mean(episodes_combined_reward),
             'combined_reward_std': np.std(episodes_combined_reward),
             'episode_steps': np.mean(episodes_steps),
@@ -896,7 +900,7 @@ class PPOAgent:
                     self.tb_writer.add_scalar(f'{epoch_prefix}/{k}', v, self.c_epoch)
 
     def log_train_stats(self, stats, is_policy: bool = False) -> None:
-        tb_prefix = 'train_policy' if is_policy else 'train_value'
+        tb_prefix = 'ppo_policy' if is_policy else 'ppo_value'
         step_count = self.c_policy_update if is_policy else self.c_value_update
         if self.tb_writer is not None:
             for k, v in stats.items():
@@ -904,7 +908,6 @@ class PPOAgent:
                     self.tb_writer.add_scalar(f'{tb_prefix}/{k}', v, step_count)
 
         prefix = 'Train policy statistics' if is_policy else 'Train value statistics'
-
         logger.info(f'{prefix} steps {step_count}\n{stats}')
 
 
@@ -1135,8 +1138,8 @@ def main():
             top_p=cfg.train_top_p,
             min_gen_len=cfg.min_gen_len,
             max_gen_len=cfg.max_seq_len - cfg.max_prompt_len,
-            whiten_rewards=cfg.whiten_rewards,
-            whiten_advantages=cfg.whiten_advantages,
+            normalize_rewards=cfg.normalize_rewards,
+            normalize_advantages=cfg.normalize_advantages,
             is_training=True,
         )
 
@@ -1177,8 +1180,8 @@ def main():
                 top_p=cfg.val_top_p,
                 min_gen_len=cfg.min_gen_len,
                 max_gen_len=cfg.max_seq_len - cfg.max_prompt_len,
-                whiten_rewards=cfg.whiten_rewards,
-                whiten_advantages=False,  # don't compute advantages during inference
+                normalize_rewards=cfg.normalize_rewards,
+                normalize_advantages=False,  # don't compute advantages during inference
                 is_training=False,
             )
 
