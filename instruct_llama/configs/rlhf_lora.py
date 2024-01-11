@@ -80,7 +80,7 @@ class config:
     # PPO learning
     max_episodes: int = int(1e6)  # total number of training episodes
     train_episodes_per_epoch: int = 1024  # how many training selfplay episodes to run per epoch
-    micro_batch_size: int = 2
+    train_batch_size: int = 2
     gradient_accum_steps: int = 32
     train_log_interval: int = 10  # log training metrics (loss etc.)
     update_epochs: int = 4  # PPO update epoch

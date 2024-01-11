@@ -20,7 +20,7 @@ wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 
 
-from instruct_llama.model_lora import Transformer, LoraModelArgs
+from instruct_llama.models.model_lora import Transformer, LoraModelArgs
 
 
 def get_clean_state_dict(model: nn.Module):

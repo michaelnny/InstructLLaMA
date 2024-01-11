@@ -15,8 +15,15 @@ import numpy as np
 import torch
 from torch import nn
 
-import instruct_llama.model as llama
-from instruct_llama.lora import LoRALinear, LoRALinear4bit, Linear4bit
+# # support running without installing as a package
+# from pathlib import Path
+# import sys
+
+# wd = Path(__file__).parent.parent.parent.resolve()
+# sys.path.append(str(wd))
+
+import instruct_llama.models.model as llama
+from instruct_llama.models.lora import LoRALinear, LoRALinear4bit, Linear4bit
 
 
 logger = logging.getLogger(__name__)

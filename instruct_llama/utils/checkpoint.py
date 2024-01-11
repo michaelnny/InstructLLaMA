@@ -4,8 +4,8 @@ import torch
 import logging
 from typing import Union
 
-from instruct_llama.model import Transformer
-from instruct_llama.lora import lora_state_dict
+from instruct_llama.models.model import Transformer
+from instruct_llama.models.lora import lora_state_dict
 from instruct_llama.utils.fsdp_checkpoint import save_full_state_model_checkpoint
 from instruct_llama.utils.normalizer import RunningMeanStd
 

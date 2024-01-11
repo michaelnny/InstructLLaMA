@@ -27,10 +27,11 @@ wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 
 
-from instruct_llama.model_lora import Transformer, LoraModelArgs
+from instruct_llama.models.model_lora import Transformer, LoraModelArgs
+from instruct_llama.models.tokenizer import Tokenizer
+from instruct_llama.models.lora import mark_only_lora_as_trainable
 from instruct_llama.configs.rlhf_lora import config as cfg
 from instruct_llama.utils.custom_dataset import BlendedDataset, PromptOnlyDataset
-from instruct_llama.tokenizer import Tokenizer
 from instruct_llama.utils.schedule import CosineDecayWithWarmupLRScheduler
 from instruct_llama.utils.train_helper import (
     create_trace_profiler,
@@ -41,10 +42,9 @@ from instruct_llama.utils.train_helper import (
     masked_sum,
     split_indices_into_bins,
 )
-from instruct_llama.utils.logging import create_logger
+from instruct_llama.utils.logger import create_logger
 from instruct_llama.utils.env import PromptEnv
 from instruct_llama.utils.normalizer import RunningMeanStd
-from instruct_llama.lora import mark_only_lora_as_trainable
 from instruct_llama.utils.checkpoint import create_lora_checkpoint
 from instruct_llama.generation import sample_top_p
 
@@ -230,7 +230,7 @@ class PPOAgent:
         value_optimizer: torch.optim.AdamW,
         value_scheduler: CosineDecayWithWarmupLRScheduler,
         update_epochs: int,
-        micro_batch_size: int,
+        train_batch_size: int,
         gradient_accum_steps: int,
         policy_clip_eps: float = 0.2,
         value_clip_eps: float = 0.2,
@@ -268,7 +268,7 @@ class PPOAgent:
         self.model_params = self.policy_model.params
 
         self.update_epochs = update_epochs
-        self.micro_batch_size = micro_batch_size
+        self.train_batch_size = train_batch_size
         self.gradient_accum_steps = gradient_accum_steps
         self.value_clip_eps = value_clip_eps
         self.policy_clip_eps = policy_clip_eps
@@ -608,7 +608,7 @@ class PPOAgent:
 
         for _ in range(self.update_epochs):
             # Split transitions into micro batches
-            batch_indices = split_indices_into_bins(self.micro_batch_size, len(transitions), shuffle=True, drop_last=True)
+            batch_indices = split_indices_into_bins(self.train_batch_size, len(transitions), shuffle=True, drop_last=True)
             micro_batches = [get_batched_transitions([transitions[i] for i in indices], eos_id) for indices in batch_indices]
 
             for i in range(0, len(micro_batches), self.gradient_accum_steps):
@@ -632,7 +632,7 @@ class PPOAgent:
 
         for _ in range(self.update_epochs):
             # Split transitions into micro batches
-            batch_indices = split_indices_into_bins(self.micro_batch_size, len(transitions), shuffle=True, drop_last=True)
+            batch_indices = split_indices_into_bins(self.train_batch_size, len(transitions), shuffle=True, drop_last=True)
             micro_batches = [get_batched_transitions([transitions[i] for i in indices], eos_id) for indices in batch_indices]
 
             for i in range(0, len(micro_batches), self.gradient_accum_steps):
@@ -916,10 +916,10 @@ def main():
     assert cfg.train_log_interval >= 1
     assert cfg.selfplay_log_interval >= 1
     assert cfg.gradient_accum_steps >= 1
-    assert cfg.micro_batch_size >= 1
-    assert cfg.train_episodes_per_epoch >= (cfg.gradient_accum_steps * cfg.micro_batch_size)
+    assert cfg.train_batch_size >= 1
+    assert cfg.train_episodes_per_epoch >= (cfg.gradient_accum_steps * cfg.train_batch_size)
 
-    batch_size = int(cfg.micro_batch_size * cfg.gradient_accum_steps)
+    batch_size = int(cfg.train_batch_size * cfg.gradient_accum_steps)
 
     if not os.path.exists(cfg.sft_ckpt_file):
         raise ValueError(f'Invalid SFT model checkpoint {cfg.sft_ckpt_file!r}, aborting ...')
@@ -946,7 +946,7 @@ def main():
     # Our custom IterableDatasets already have sharding and shuffle mechanism implemented
     cuda_kwargs = {
         'num_workers': cfg.dataloader_workers,
-        'batch_size': cfg.micro_batch_size,
+        'batch_size': cfg.train_batch_size,
         'pin_memory': True,
         'shuffle': False,
         'sampler': None,
@@ -1051,7 +1051,7 @@ def main():
     mark_only_lora_as_trainable(policy_model, train_bias=cfg.train_bias, train_head=cfg.train_head)
     mark_only_lora_as_trainable(value_model, train_bias=cfg.train_bias, train_head=cfg.train_head)
 
-    num_train_iters = int(cfg.update_epochs * (cfg.max_episodes / batch_size))
+    max_train_steps = int(cfg.update_epochs * (cfg.max_episodes / batch_size))
     num_epochs = cfg.max_episodes // cfg.train_episodes_per_epoch
 
     policy_optimizer = create_optimizer(
@@ -1070,7 +1070,7 @@ def main():
         max_lr=cfg.policy_max_lr,
         min_lr=cfg.policy_min_lr,
         warmup_steps=cfg.policy_warmup_steps,
-        max_decay_steps=num_train_iters,
+        max_decay_steps=max_train_steps,
     )
     value_optimizer = create_optimizer(
         model=value_model,
@@ -1087,7 +1087,7 @@ def main():
         max_lr=cfg.value_max_lr,
         min_lr=cfg.value_min_lr,
         warmup_steps=cfg.value_warmup_steps,
-        max_decay_steps=num_train_iters,
+        max_decay_steps=max_train_steps,
     )
 
     ppo_agent = PPOAgent(
@@ -1100,7 +1100,7 @@ def main():
         value_optimizer=value_optimizer,
         value_scheduler=value_scheduler,
         update_epochs=cfg.update_epochs,
-        micro_batch_size=cfg.micro_batch_size,
+        train_batch_size=cfg.train_batch_size,
         gradient_accum_steps=cfg.gradient_accum_steps,
         policy_clip_eps=cfg.policy_clip_eps,
         value_clip_eps=cfg.value_clip_eps,

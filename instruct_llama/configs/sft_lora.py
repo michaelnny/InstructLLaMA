@@ -39,15 +39,15 @@ class config:
     full_pad: bool = False
 
     # training and validation loops
-    num_epochs: int = 2
-    # accumulate gradients so for each iteration, the actual batch size is = micro_batch_size x gradient_accum_steps
-    micro_batch_size: int = 2
-    gradient_accum_steps: int = 30
-    val_interval: int = 100
+    num_epochs: int = 3
+    # accumulate gradients so for each iteration, the actual batch size is = train_batch_size x gradient_accum_steps
+    train_batch_size: int = 2
+    gradient_accum_steps: int = 64
+    val_interval: int = 200
     val_batch_size: int = 30
-    val_iters: int = 20
+    val_steps: int = 20
     log_interval: int = 10  # log training metrics (loss, accuracy)
-    ckpt_interval: int = 100  # save model checkpoints every N training iterations
+    ckpt_interval: int = 200  # save model checkpoints every N training iterations
 
     # LoRA configuration
     lora_r: int = 64
@@ -56,32 +56,32 @@ class config:
 
     # LoRA trainable layers
     lora_attn_query: bool = True  # train Attention query layer
-    lora_attn_key: bool = True  # train Attention key layer
+    lora_attn_key: bool = False  # train Attention key layer
     lora_attn_value: bool = True  # train Attention value layer
-    lora_attn_proj: bool = True  # train Attention projection layer
-    lora_attn_mlp: bool = True  # train Attention MLP block
+    lora_attn_proj: bool = False  # train Attention projection layer
+    lora_attn_mlp: bool = False  # train Attention MLP block
 
     train_bias: str = 'none'  # none, lora_only, all
-    train_head: bool = True  # note we don't apply LoRA to model output head
+    train_head: bool = False  # note we don't apply LoRA to model output head
 
     # Quantization
-    quant_4bit: bool = True  # quantize frozen linear layer
-    quant_lora_4bit: bool = True  # quantize LoRA linear layer
+    quant_4bit: bool = False  # quantize frozen linear layer
+    quant_lora_4bit: bool = False  # quantize LoRA linear layer
     quant_4bit_double: bool = True  # double quantize
     quant_4bit_type: str = 'nf4'  # only supports 'fp4' or 'nf4'
 
     # learning rate
-    init_lr: float = 1e-5  # initial learning rate
-    max_lr: float = 2e-5  # max learning rate after warm up
-    min_lr: float = 5e-6  # min learning rate after decay
-    warmup_ratio: float = 0.05
+    init_lr: float = 5e-5  # initial learning rate
+    max_lr: float = 3e-4  # max learning rate after warm up
+    min_lr: float = 1e-4  # min learning rate after decay
+    warmup_ratio: float = 0.03
 
     # prompt is less important than completion
     prompt_loss_weight: float = 0.01
     completion_loss_weight: float = 1.0
 
     # AdamW optimizer
-    use_paged_adamw: bool = True  # need this if using 4bit quantization
+    use_paged_adamw: bool = False  # need this if using 4bit quantization
     weight_decay: float = 0.0
     adam_betas: Tuple = (0.9, 0.95)
     adam_eps: float = 1e-5

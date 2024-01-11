@@ -4,7 +4,7 @@ import logging
 import torch
 from torch.distributions import Categorical
 
-from instruct_llama.model_lora import Transformer
+from instruct_llama.models.model_lora import Transformer
 from instruct_llama.utils.custom_dataset import PromptOnlyDataset
 from instruct_llama.utils.normalizer import RunningMeanStd
 

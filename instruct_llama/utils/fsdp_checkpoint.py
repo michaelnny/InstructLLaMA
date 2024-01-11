@@ -38,7 +38,7 @@ import sys
 wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 
-from instruct_llama.lora import lora_state_dict_from_full_state_dict
+from instruct_llama.models.lora import lora_state_dict_from_full_state_dict
 
 logger = logging.getLogger(__name__)
 

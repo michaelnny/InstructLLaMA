@@ -21,7 +21,7 @@ wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 
 
-from instruct_llama.model import Transformer, ModelArgs
+from instruct_llama.models.model import Transformer, ModelArgs
 
 
 def convert_state_dict(state_dict: Dict[str, torch.Tensor], dtype: torch.dtype = torch.bfloat16) -> Dict[str, torch.Tensor]:

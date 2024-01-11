@@ -220,21 +220,6 @@ We can monitoring the training progress by using Tensorboard:
 tensorboard --logdir=./logs
 ```
 
-**QLoRA SFT**
-![SFT Tensorboard](/images/tensorboard_sft_lora.png)
-
-**QLoRA RM**
-![RM Tensorboard](/images/tensorboard_rm_lora.png)
-
-**QLoRA RLHF PPO - train self-play epochs** (1 epoch = 1024 episodes)
-![RLHF PPO Tensorboard](/images/tensorboard_rlhf_lora_train_epochs.png)
-
-**QLoRA RLHF PPO - validation self-play epochs** (1 epoch = 128 episodes)
-![RLHF PPO Tensorboard](/images/tensorboard_rlhf_lora_val_epochs.png)
-
-**QLoRA RLHF PPO - train PPO policy**
-![RLHF PPO Tensorboard](/images/tensorboard_rlhf_lora_train_ppo_policy.png)
-
 # License
 
 This project is licensed under the MIT License (the "License")

@@ -5,13 +5,11 @@
 
 """Train reward model (RM) using QLoRA, starting from a fine-tuned model."""
 import os
-import itertools
 import functools
 from typing import Tuple, Mapping, Text, Any
 import tqdm
 import random
 import math
-import json
 import numpy as np
 
 import torch
@@ -28,10 +26,12 @@ wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 
 
-from instruct_llama.model_lora import Transformer, LoraModelArgs
+from instruct_llama.models.model_lora import Transformer, LoraModelArgs
+from instruct_llama.models.tokenizer import Tokenizer
+from instruct_llama.models.lora import mark_only_lora_as_trainable
+
 from instruct_llama.configs.rm_lora import config as cfg
 from instruct_llama.utils.custom_dataset import ComparisonsDataset
-from instruct_llama.tokenizer import Tokenizer
 from instruct_llama.utils.schedule import CosineDecayWithWarmupLRScheduler
 from instruct_llama.utils.train_helper import (
     create_trace_profiler,
@@ -39,8 +39,8 @@ from instruct_llama.utils.train_helper import (
     compute_num_trainable_params,
     get_grad_norm_local,
 )
-from instruct_llama.utils.logging import create_logger
-from instruct_llama.lora import mark_only_lora_as_trainable
+from instruct_llama.utils.logger import create_logger, log_statistics
+from instruct_llama.utils.tracker import RMStatsTracker
 from instruct_llama.utils.checkpoint import create_lora_checkpoint, create_normalizer_checkpoint
 from instruct_llama.utils.normalizer import RunningMeanStd
 
@@ -48,13 +48,13 @@ from instruct_llama.utils.normalizer import RunningMeanStd
 logger = create_logger()
 
 
-def create_checkpoint(model, norm, iter, is_best=False):
+def create_checkpoint(model, norm, step, is_best=False):
     if is_best:
         lora_full_path = os.path.join(cfg.ckpt_dir, f'lora_{cfg.model_type}-best.pth')
         norm_full_path = os.path.join(cfg.ckpt_dir, f'normalizer_{cfg.model_type}-best.pth')
     else:
-        lora_full_path = os.path.join(cfg.ckpt_dir, f'lora_{cfg.model_type}-iter-{iter}.pth')
-        norm_full_path = os.path.join(cfg.ckpt_dir, f'normalizer_{cfg.model_type}-iter-{iter}.pth')
+        lora_full_path = os.path.join(cfg.ckpt_dir, f'lora_{cfg.model_type}-steps-{step}.pth')
+        norm_full_path = os.path.join(cfg.ckpt_dir, f'normalizer_{cfg.model_type}-steps-{step}.pth')
 
     create_lora_checkpoint(model, lora_full_path, cfg.train_bias, cfg.train_head)
     create_normalizer_checkpoint(norm, norm_full_path)
@@ -133,79 +133,61 @@ def compute_metrics(rewards: torch.Tensor) -> Tuple[int, int, float, float]:
     return num_accurate, C, r_best, r_worst
 
 
-def run_single_train_step(
+def train_step(
     model: Transformer,
-    train_loader: DataLoader,
-    optimizer: torch.optim.AdamW,
-    scheduler: CosineDecayWithWarmupLRScheduler,
+    batch: Tuple[torch.Tensor],
     scaler: torch.cuda.amp.GradScaler,
     reward_stats: RunningMeanStd,
     gradient_accum_steps: int,
-    grad_clip: float,
     normalize_reward: bool,
     max_abs_reward: float,
-    return_stats: bool = False,
-) -> Mapping[Text, Any]:
-    """A single training iteration consists of N micro batch * M gradient accumulation steps.
+    tracker: RMStatsTracker,
+) -> None:
+    """Run a single training step, where we do a forward + backward passes, but do no update parameters"""
 
-    ```
-    optimizer.zero_grad()
-    for step in range(gradient_accum_steps):
-        data, target = next(train_loader)
-        output = model(data)
-        loss = compute_loss(output, target)
-        loss.backward()
-
-    optimizer.step()
-    ```
-
-    """
     assert gradient_accum_steps >= 1
 
-    metrics = torch.zeros(6).to('cuda')
+    batch_tokens, terminal_steps = batch
+    batch_tokens = batch_tokens.to('cuda', non_blocking=True)
+    terminal_steps = terminal_steps.to('cuda', non_blocking=True)
 
-    # prepare for next update
-    optimizer.zero_grad(set_to_none=True)
+    # forward pass to compute reward for all completions
+    outputs = model(batch_tokens).squeeze(-1)  # [num_combinations, seq_length]
 
-    # here one sample is a prompt and a list of completions, where the completions are already ordered by the score, from best to worst
-    for batch_tokens, terminal_steps in itertools.islice(train_loader, gradient_accum_steps):
-        batch_tokens = batch_tokens.to('cuda', non_blocking=True)
-        terminal_steps = terminal_steps.to('cuda', non_blocking=True)
+    # get rewards for terminal step, where sequence ends with EOS token, or reached maximum seq_length
+    rewards = torch.gather(outputs, dim=1, index=terminal_steps.unsqueeze(-1)).squeeze(1)  # [num_combinations]
+    raw_rewards = rewards.clone().detach()
+    if normalize_reward:
+        rewards = reward_stats.normalize(rewards)
+    if max_abs_reward > 0:
+        rewards = rewards.clamp(min=-max_abs_reward, max=max_abs_reward)
 
-        # forward pass to compute reward for all completions
-        outputs = model(batch_tokens).squeeze(-1)  # [num_combinations, seq_length]
+    # compute loss in a single go
+    loss = compute_rm_comparison_loss(rewards)
 
-        # get rewards for terminal step, where sequence ends with EOS token, or reached maximum seq_length
-        rewards = torch.gather(outputs, dim=1, index=terminal_steps.unsqueeze(-1)).squeeze(1)  # [num_combinations]
-        raw_rewards = rewards.clone().detach()
-        if normalize_reward:
-            rewards = reward_stats.normalize(rewards)
-        if max_abs_reward > 0:
-            rewards = rewards.clamp(min=-max_abs_reward, max=max_abs_reward)
+    # scale the loss to account for gradient accumulation
+    scaled_loss = loss / gradient_accum_steps
 
-        # compute loss in a single go
-        loss = compute_rm_comparison_loss(rewards)
-        num_acc, num_samples, r_best, r_worst = compute_metrics(rewards.detach())
-        metrics[0] += loss.detach().item()  # sum up micro batch loss
-        metrics[1] += 1  # increase number of samples
-        metrics[2] += num_acc  # sum up number of accurate prediction tokens
-        metrics[3] += num_samples  # sum up number of responses or combinations
-        metrics[4] += r_best  # sum up best reward
-        metrics[5] += r_worst  # sum up worst reward
+    if scaler is not None:  # when using float16
+        scaler.scale(scaled_loss).backward()
+    else:
+        scaled_loss.backward()
 
-        # scale the loss to account for gradient accumulation
-        scaled_loss = loss / gradient_accum_steps
+    num_acc, num_samples, r_best, r_worst = compute_metrics(rewards.detach())
+    tracker.update(loss.detach(), num_acc, num_samples, r_best, r_worst)
 
-        if scaler is not None:  # when using float16
-            scaler.scale(scaled_loss).backward()
-        else:
-            scaled_loss.backward()
+    # always update reward norm stats
+    reward_stats.update(raw_rewards)
 
-        # always update reward norm stats
-        reward_stats.update(raw_rewards)
 
-    grad_norm = get_grad_norm_local(model)
-
+def update_step(
+    model: Transformer,
+    optimizer: torch.optim.AdamW,
+    scheduler: CosineDecayWithWarmupLRScheduler,
+    grad_clip: float,
+    scaler: torch.cuda.amp.GradScaler = None,
+) -> None:
+    """Run a single parameter update step"""
     if grad_clip > 0.0:
         if scaler is not None:  # when using float16
             scaler.unscale_(optimizer)  # unscale before clip gradients
@@ -218,44 +200,28 @@ def run_single_train_step(
     else:
         optimizer.step()
 
+    # prepare for next update
+    optimizer.zero_grad(set_to_none=True)
     scheduler.step()  # call lr scheduler on a step-by-step basis instead of epoch
-
-    if return_stats:
-        loss_mean = metrics[0] / metrics[1]
-        accuracy = 100 * metrics[2] / metrics[3]
-        preferred_reward_mean = metrics[4] / metrics[1]
-        rejected_reward_mean = metrics[5] / metrics[1]
-
-        return {
-            'loss': loss_mean.item(),
-            'accuracy': accuracy.item(),
-            'preferred_reward': preferred_reward_mean.item(),
-            'rejected_reward': rejected_reward_mean.item(),
-            'reward_gap': (preferred_reward_mean - rejected_reward_mean).item(),
-            'learning_rate': optimizer.param_groups[0]['lr'],
-            'grad_norm': grad_norm.item(),
-        }
-    else:
-        return None
 
 
 @torch.no_grad()
 def run_validation_steps(
     model: Transformer,
-    val_loader: DataLoader,
-    val_iters: int,
+    loader: DataLoader,
+    steps: int,
     reward_stats: RunningMeanStd,
     normalize_reward: bool,
     max_abs_reward: float,
-) -> Mapping[Text, Any]:
-    """Run M validation iterations"""
+    tracker: RMStatsTracker,
+) -> None:
+    """Run M validation steps"""
 
-    model.eval()  # set model in validation mode
-    metrics = torch.zeros(6).to('cuda')
-    inner_pbar = tqdm.tqdm(range(val_iters), colour='green', desc='validation iterations')
+    tracker.reset()
+    inner_pbar = tqdm.tqdm(range(steps), colour='green', desc='Validation steps')
 
     # here one sample is a prompt and a list of completions, where the completions are already ordered by the score, from best to worst
-    for batch_tokens, terminal_steps in itertools.islice(val_loader, val_iters):
+    for i, (batch_tokens, terminal_steps) in enumerate(loader):
         batch_tokens = batch_tokens.to('cuda', non_blocking=True)
         terminal_steps = terminal_steps.to('cuda', non_blocking=True)
 
@@ -264,7 +230,7 @@ def run_validation_steps(
 
         # get rewards for terminal step, where sequence ends with EOS token, or reached maximum seq_length
         rewards = torch.gather(outputs, dim=1, index=terminal_steps.unsqueeze(-1)).squeeze(1)  # [num_combinations]
-        raw_rewards = rewards.clone().detach()
+        # raw_rewards = rewards.clone().detach()
         if normalize_reward:
             rewards = reward_stats.normalize(rewards)
         if max_abs_reward > 0:
@@ -273,12 +239,7 @@ def run_validation_steps(
         # compute loss in a single go
         loss = compute_rm_comparison_loss(rewards)
         num_acc, num_samples, r_best, r_worst = compute_metrics(rewards.detach())
-        metrics[0] += loss.detach().item()  # sum up micro batch loss
-        metrics[1] += 1  # increase number of samples
-        metrics[2] += num_acc  # sum up number of accurate prediction tokens
-        metrics[3] += num_samples  # sum up number of responses or combinations
-        metrics[4] += r_best  # sum up best reward
-        metrics[5] += r_worst  # sum up worst reward
+        tracker.update(loss.detach(), num_acc, num_samples, r_best, r_worst)
 
         # # maybe don't update reward norm stats in evaluation mode
         # reward_stats.update(raw_rewards)
@@ -286,22 +247,10 @@ def run_validation_steps(
         if inner_pbar is not None:
             inner_pbar.update(1)
 
-    loss = metrics[0] / metrics[1]
-    accuracy = 100 * metrics[2] / metrics[3]
-    preferred_reward_mean = metrics[4] / metrics[1]
-    rejected_reward_mean = metrics[5] / metrics[1]
+        if i >= steps:
+            break
 
     inner_pbar.close()
-
-    model.train()  # set model in training mode after validation runs
-
-    return {
-        'loss': loss.item(),
-        'accuracy': accuracy.item(),
-        'preferred_reward': preferred_reward_mean.item(),
-        'rejected_reward': rejected_reward_mean.item(),
-        'reward_gap': (preferred_reward_mean - rejected_reward_mean).item(),
-    }
 
 
 def custom_collate_fn(batch, pad_id: int, max_seq_len: int, full_pad: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -348,13 +297,9 @@ def main():
     assert cfg.num_epochs >= 1
     assert cfg.gradient_accum_steps >= 1
     assert cfg.log_interval >= 1
-    assert cfg.val_interval >= 1
-    assert cfg.val_iters >= 1
+    assert cfg.val_interval >= 0
+    assert cfg.val_steps >= 1
     assert cfg.max_abs_reward >= 0.0
-
-    batch_size = int(cfg.gradient_accum_steps)
-
-    assert batch_size >= 1
 
     if not torch.version.cuda:
         raise RuntimeError('This script requires Pytorch with CUDA.')
@@ -378,7 +323,7 @@ def main():
     cuda_kwargs = {
         'num_workers': 1,
         'batch_size': 1,  # always work on one sample at a time
-        'pin_memory': True,
+        'pin_memory': False,
         'shuffle': True,
         'sampler': None,
     }
@@ -387,14 +332,16 @@ def main():
     train_loader = DataLoader(dataset=train_dataset, collate_fn=_collate_fn, **cuda_kwargs)
     logger.info(f'Train dataset metadata:\n{train_dataset.get_metadata()}')
 
-    num_train_iters = int((len(train_dataset) / batch_size) * cfg.num_epochs)
-
     # create validation dataset
     val_loader = None
     if cfg.val_interval > 0:
         val_dataset = ComparisonsDataset(data_sources=cfg.val_datasources, max_seq_len=cfg.max_seq_len)
         val_loader = DataLoader(dataset=val_dataset, collate_fn=_collate_fn, **cuda_kwargs)
         logger.info(f'Validation dataset metadata:\n{val_dataset.get_metadata()}')
+
+    batch_size = int(cfg.train_batch_size * cfg.gradient_accum_steps)
+    steps_per_epoch = len(train_loader) // cfg.gradient_accum_steps
+    max_train_steps = steps_per_epoch * cfg.num_epochs
 
     # --------------- Setup model and optimizer ---------------
 
@@ -494,21 +441,19 @@ def main():
         init_lr=cfg.init_lr,
         max_lr=cfg.max_lr,
         min_lr=cfg.min_lr,
-        warmup_steps=int(cfg.warmup_ratio * num_train_iters),
-        max_decay_steps=num_train_iters,
+        warmup_steps=int(cfg.warmup_ratio * max_train_steps),
+        max_decay_steps=max_train_steps,
     )
 
     reward_stats = RunningMeanStd()
 
     # --------------- Start Training ---------------
 
-    logger.info(
-        f'Starting to run {cfg.num_epochs} training epochs, total of {num_train_iters} iterations, with batch size {batch_size}'
-    )
     torch_profiler = None
     tb_writer = None
-    inner_pbar = None
+    inner_pbar = tqdm.tqdm(range(max_train_steps), colour='blue', desc='Training steps')
     best_val_accuracy = 0.0
+    train_steps = 0
 
     os.makedirs(cfg.log_dir, exist_ok=True)
     os.makedirs(cfg.ckpt_dir, exist_ok=True)
@@ -520,70 +465,78 @@ def main():
     if cfg.use_profiler:
         torch_profiler = create_trace_profiler(os.path.join(cfg.log_dir, 'profile_traces'))
 
-    inner_pbar = tqdm.tqdm(range(num_train_iters), colour='blue', desc='Training iterations')
+    train_tracker = RMStatsTracker()
+    val_tracker = RMStatsTracker()
 
-    model.train()
+    logger.info(
+        f'Starting to run {cfg.num_epochs} training epochs, total of {max_train_steps} steps, with batch size {batch_size}'
+    )
 
-    for i in range(1, num_train_iters + 1):
-        train_stats = run_single_train_step(
-            model=model,
-            train_loader=train_loader,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            scaler=scaler,
-            reward_stats=reward_stats,
-            gradient_accum_steps=cfg.gradient_accum_steps,
-            grad_clip=cfg.grad_clip,
-            normalize_reward=cfg.normalize_reward,
-            max_abs_reward=cfg.max_abs_reward,
-            return_stats=i == 1 or i % cfg.log_interval == 0 or i == num_train_iters,
-        )
+    for epoch in range(1, cfg.num_epochs + 1):  # for each epoch
+        logger.info(f'Start epoch {epoch}')
+        model.train()
+        train_tracker.reset()
+        val_tracker.reset()
 
-        if inner_pbar is not None:
-            inner_pbar.update(1)
-
-        if torch_profiler is not None:
-            torch_profiler.step()
-
-        # logging
-        if train_stats is not None:
-            logger.info(
-                f'Training iteration {i}: train loss: {train_stats["loss"]:.4f}, train accuracy: {train_stats["accuracy"]:.2f}%, learning rate: {train_stats["learning_rate"]:.7f}'
+        for iter, batch in enumerate(train_loader):  # for each batch in current epoch
+            train_step(
+                model,
+                batch,
+                scaler,
+                reward_stats,
+                cfg.gradient_accum_steps,
+                cfg.normalize_reward,
+                cfg.max_abs_reward,
+                train_tracker,
             )
 
-            if tb_writer is not None:
-                for k, v in train_stats.items():
-                    tb_writer.add_scalar(f'train/{k}', v, i)
+            if iter % cfg.gradient_accum_steps == 0:
+                grad_norm = get_grad_norm_local(model)
+                update_step(model, optimizer, scheduler, cfg.grad_clip, scaler)
+                inner_pbar.update(1)
+                train_steps += 1
 
-        # regular checkpointing
-        if cfg.ckpt_interval > 0 and (i % cfg.ckpt_interval == 0 or i == num_train_iters):
-            create_checkpoint(model, reward_stats, i)
+                if torch_profiler is not None:
+                    torch_profiler.step()
 
-        # validation steps
-        if i % cfg.val_interval == 0 or i == num_train_iters:
-            val_stats = run_validation_steps(
-                model=model,
-                val_loader=val_loader,
-                val_iters=cfg.val_iters,
-                reward_stats=reward_stats,
-                normalize_reward=cfg.normalize_reward,
-                max_abs_reward=cfg.max_abs_reward,
-            )
+                # logging training statistics
+                if train_steps % cfg.log_interval == 0:
+                    train_stats = train_tracker.get_dict()
+                    train_stats['learning_rate'] = optimizer.param_groups[0]['lr']
+                    train_stats['grad_norm'] = grad_norm.item()
+                    log_statistics(tb_writer, train_steps, train_stats, True)
+                    train_tracker.reset()
 
-            logger.info(
-                f'Training iteration {i}: validation loss: {val_stats["loss"]:.4f}, validation accuracy: {val_stats["accuracy"]:.2f}%'
-            )
+                # regular checkpointing
+                if cfg.ckpt_interval > 0 and (train_steps % cfg.ckpt_interval == 0 or train_steps == max_train_steps):
+                    create_checkpoint(model, reward_stats, train_steps, False)
 
-            if tb_writer is not None:
-                for k, v in val_stats.items():
-                    tb_writer.add_scalar(f'val/{k}', v, i)
+                # validation steps
+                if cfg.val_steps > 0 and (
+                    cfg.val_interval > 0 and train_steps % cfg.val_interval == 0 or train_steps == max_train_steps
+                ):
+                    val_tracker.reset()
+                    model.eval()
+                    run_validation_steps(
+                        model,
+                        val_loader,
+                        cfg.val_steps,
+                        reward_stats,
+                        cfg.normalize_reward,
+                        cfg.max_abs_reward,
+                        val_tracker,
+                    )
+                    model.train()
 
-            if val_stats['accuracy'] > best_val_accuracy:
-                best_val_accuracy = val_stats['accuracy']
-                logger.info(f'New best validation accuracy: {val_stats["accuracy"]:.2f}%')
-                logger.info(f'Reward mean: {reward_stats.mean.item()}, reward variance: {reward_stats.var.item()}')
-                # save best model
-                create_checkpoint(model, reward_stats, i, is_best=True)
+                    val_stats = val_tracker.get_dict()
+                    log_statistics(tb_writer, train_steps, val_stats, False)
+
+                    if val_stats['accuracy'] > best_val_accuracy:
+                        best_val_accuracy = val_stats['accuracy']
+                        logger.info(f'New best validation accuracy: {val_stats["accuracy"]:.2f}%')
+                        logger.info(f'Reward mean: {reward_stats.mean.item()}, reward variance: {reward_stats.var.item()}')
+                        # save best model
+                        create_checkpoint(model, reward_stats, train_steps, True)
 
     # training is done ...show some training stats.
     logger.info(f'CUDA Memory Summary After Last training:\n{torch.cuda.memory_summary()}')

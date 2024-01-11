@@ -42,10 +42,10 @@ class config:
     num_epochs: int = 5
     # we always use micro batch size of 1 (sample) during training and evaluation
     gradient_accum_steps: int = 64
-    val_interval: int = 100  # this also decides how often we create model checkpoints
-    val_iters: int = 200
+    val_interval: int = 200  # this also decides how often we create model checkpoints
+    val_steps: int = 200
     log_interval: int = 10  # log training metrics (loss, accuracy)
-    ckpt_interval: int = 100  # save model checkpoints every N training iterations
+    ckpt_interval: int = 200  # save model checkpoints every N training iterations
 
     # whether normalize reward before compute loss during training and validation
     normalize_reward: bool = True
@@ -67,16 +67,16 @@ class config:
     train_head: bool = True  # note we don't apply LoRA to model output head
 
     # Quantization
-    quant_4bit: bool = True  # quantize frozen linear layer
-    quant_lora_4bit: bool = True  # quantize LoRA linear layer
+    quant_4bit: bool = False  # quantize frozen linear layer
+    quant_lora_4bit: bool = False  # quantize LoRA linear layer
     quant_4bit_double: bool = True  # double quantize
     quant_4bit_type: str = 'nf4'  # only supports 'fp4' or 'nf4'
 
     # learning rate scheduler
-    init_lr: float = 1e-5  # initial learning rate
-    max_lr: float = 2e-5  # max learning rate after warm up
-    min_lr: float = 5e-6  # min learning rate after decay
-    warmup_ratio: float = 0.05
+    init_lr: float = 5e-5  # initial learning rate
+    max_lr: float = 5e-4  # max learning rate after warm up
+    min_lr: float = 2e-4  # min learning rate after decay
+    warmup_ratio: float = 0.03
 
     # AdamW optimizer
     use_paged_adamw: bool = True  # need this if using 4bit quantization
@@ -88,8 +88,8 @@ class config:
 
     # dropout regularization
     embed_dropout: float = 0.0
-    attn_dropout: float = 0.0
-    resid_dropout: float = 0.0
+    attn_dropout: float = 0.1
+    resid_dropout: float = 0.1
 
     mixed_precision: bool = True  # default to BF16, but if no native GPU support detected, will use FP16.
     compile_model: bool = False  # not working with QLoRA

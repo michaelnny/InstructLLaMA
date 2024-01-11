@@ -2,9 +2,13 @@
 # This project is released under the MIT License.
 # See the accompanying LICENSE file for details.
 
-
+from typing import Dict
 import sys
 import logging
+
+from torch.utils.tensorboard import SummaryWriter
+
+logger = logging.getLogger(__name__)
 
 
 class DummyLogger:
@@ -36,3 +40,13 @@ def create_logger(level='INFO', rank=0):
         return logger
     else:
         return DummyLogger()
+
+
+def log_statistics(tb_writer: SummaryWriter, train_steps: int, stats: Dict, is_training: bool) -> None:
+    logger.info(f'Training steps {train_steps}, is status for validation: {not is_training}')
+    logger.info(stats)
+
+    if tb_writer is not None:
+        tb_tag = 'train' if is_training else 'val'
+        for k, v in stats.items():
+            tb_writer.add_scalar(f'{tb_tag}/{k}', v, train_steps)

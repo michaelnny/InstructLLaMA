@@ -23,8 +23,8 @@ wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 
 
-from instruct_llama.model import ModelArgs, Transformer
-from instruct_llama.tokenizer import Tokenizer
+from instruct_llama.models.model import ModelArgs, Transformer
+from instruct_llama.models.tokenizer import Tokenizer
 from instruct_llama.utils.prompt_builder import (
     Message,
     Dialog,

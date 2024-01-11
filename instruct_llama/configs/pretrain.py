@@ -51,20 +51,20 @@ class config:
     dataloader_workers: int = 1
 
     # training and validation loops
-    num_train_iters: int = 10000
-    # accumulate gradients so for each iteration, the actual batch size is = micro_batch_size x gradient_accum_steps
-    micro_batch_size: int = 4
+    num_epochs: int = 5
+    # accumulate gradients so for each iteration, the actual batch size is = train_batch_size x gradient_accum_steps
+    train_batch_size: int = 4
     gradient_accum_steps: int = 30
-    val_interval: int = 200
+    val_interval: int = 500
     val_batch_size: int = 30
-    val_iters: int = 20
+    val_steps: int = 20
     log_interval: int = 10  # log training metrics (loss, accuracy)
-    ckpt_interval: int = 200  # save model checkpoints every N training iterations
+    ckpt_interval: int = 500  # save model checkpoints every N training iterations
 
     # learning rate
     init_lr: float = 1e-5  # initial learning rate
-    max_lr: float = 2e-5  # max learning rate after warm up
-    min_lr: float = 5e-6  # min learning rate after decay
+    max_lr: float = 5e-5  # max learning rate after warm up
+    min_lr: float = 1e-5  # min learning rate after decay
     warmup_ratio: float = 0.05
 
     # AdamW optimizer
