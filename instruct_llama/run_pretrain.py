@@ -280,7 +280,6 @@ def init_weights(model: Transformer) -> None:
 
 
 def fsdp_main():
-    assert cfg.max_train_steps >= 1
     assert cfg.train_batch_size >= 1
     assert cfg.gradient_accum_steps >= 1
     assert cfg.log_interval >= 1
@@ -313,7 +312,7 @@ def fsdp_main():
     cuda_kwargs = {
         'num_workers': cfg.dataloader_workers,
         'pin_memory': False,
-        'shuffle': True,
+        'shuffle': False,
         'sampler': None,
     }
     train_loader = DataLoader(train_dataset, batch_size=cfg.train_batch_size, **cuda_kwargs)
@@ -417,8 +416,8 @@ def fsdp_main():
         init_lr=cfg.init_lr,
         max_lr=cfg.max_lr,
         min_lr=cfg.min_lr,
-        warmup_steps=int(cfg.warmup_ratio * cfg.max_train_steps),
-        max_decay_steps=cfg.max_train_steps,
+        warmup_steps=int(cfg.warmup_ratio * max_train_steps),
+        max_decay_steps=max_train_steps,
     )
 
     # --------------- Start Training ---------------
@@ -440,10 +439,10 @@ def fsdp_main():
         if cfg.use_profiler:
             torch_profiler = create_trace_profiler(os.path.join(cfg.log_dir, 'profile_traces'))
 
-        inner_pbar = tqdm.tqdm(range(cfg.max_train_steps), colour='blue', desc='Training iterations')
+        inner_pbar = tqdm.tqdm(range(max_train_steps), colour='blue', desc='Training iterations')
 
-    train_tracker = StatsTracker(True)
-    val_tracker = StatsTracker(True)
+    train_tracker = StatsTracker(True, rank=local_rank)
+    val_tracker = StatsTracker(True, rank=local_rank)
 
     logger.info(
         f'Starting to run {cfg.num_epochs} training epochs, total of {max_train_steps} steps, with batch size {batch_size}'

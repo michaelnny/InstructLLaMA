@@ -43,7 +43,7 @@ def create_logger(level='INFO', rank=0):
 
 
 def log_statistics(tb_writer: SummaryWriter, train_steps: int, stats: Dict, is_training: bool) -> None:
-    logger.info(f'Training steps {train_steps}, is status for validation: {not is_training}')
+    logger.info(f'Training steps {train_steps}, is from validation: {not is_training}')
     logger.info(stats)
 
     if tb_writer is not None:

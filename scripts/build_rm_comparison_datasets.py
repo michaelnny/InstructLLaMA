@@ -479,7 +479,7 @@ if __name__ == '__main__':
     np.random.seed(seed)
     random.seed(seed)
 
-    tokenizer = Tokenizer(model_path='./meta_checkpoints/tokenizer.model')
+    tokenizer = Tokenizer(model_path='/home/michael/models/meta_llama2/tokenizer.model')
 
     process_hh_rlhf_dataset(
         src_dir='/home/michael/datasets/hh-rlhf',

@@ -230,9 +230,8 @@ class FineTuneDataset(Dataset):
                 if seq_length <= self.max_seq_len:
                     self.data.append((x, y))
 
-        self.shuffle()
-
         if self.max_samples > 0 and len(self.data) > self.max_samples:
+            random.shuffle(self.data)
             self.data = self.data[: self.max_samples]
 
         seq_length_stats = []  # track statistics
@@ -257,9 +256,6 @@ class FineTuneDataset(Dataset):
 
         return torch.tensor(x, dtype=torch.long), torch.tensor(y, dtype=torch.long)
 
-    def shuffle(self):
-        random.shuffle(self.data)
-
     def get_metadata(self):
         return {
             'num_samples': len(self),
@@ -270,22 +266,22 @@ class FineTuneDataset(Dataset):
 
 
 class ComparisonsDataset(Dataset):
-    def __init__(self, data_sources: Iterable[str], max_seq_len: int = 2048) -> None:
+    def __init__(self, data_sources: Iterable[str], max_seq_len: int = 2048, max_samples: int = 0) -> None:
         """
         Args:
             data_sources: a list of string path to where to load the dataset.
             max_seq_len: prompt_tokens + completion_tokens length greater than this will be discarded.
+            max_samples: maximum number of samples to include, default 0 no limit.
         """
         assert len(data_sources) > 0
         assert max_seq_len > 128
+        assert max_samples >= 0
 
         self.data_sources = data_sources
         self.max_seq_len = max_seq_len
+        self.max_samples = max_samples
 
         self.data = []
-        # track some statistics
-        stats = []
-        seq_length_stats = []
 
         # Load datasets
         for source in data_sources:
@@ -303,11 +299,19 @@ class ComparisonsDataset(Dataset):
                 if len(tokens_list) < 2:  # comparison requires at least 2 samples
                     continue
 
-                stats.append(len(tokens_list))
-
-                seq_length_stats.extend([len(item) for item in tokens_list])
-
                 self.data.append(tokens_list)
+
+        if self.max_samples > 0 and len(self.data) > self.max_samples:
+            random.shuffle(self.data)
+            self.data = self.data[: self.max_samples]
+
+        # track some statistics
+        stats = []
+        seq_length_stats = []
+
+        for item in self.data:
+            stats.append(len(item))
+            seq_length_stats.extend([len(d) for d in item])
 
         self.responses_stats = {
             'min': int(np.min(stats)),
@@ -322,18 +326,12 @@ class ComparisonsDataset(Dataset):
             'std': int(np.std(seq_length_stats)),
         }
 
-        self.shuffle()
-
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
         items = self.data[idx]
-
         return items
-
-    def shuffle(self):
-        random.shuffle(self.data)
 
     def get_metadata(self):
         return {
@@ -350,7 +348,7 @@ class PromptOnlyDataset(Dataset):
         data_sources: Iterable[str],
         min_seq_len: int = 6,
         max_seq_len: int = 2048,
-        max_samples: int = 50000,
+        max_samples: int = 0,
         seed: int = 1,
     ) -> None:
         """
@@ -358,13 +356,14 @@ class PromptOnlyDataset(Dataset):
             data_sources: a list of string path to where to load the dataset.
             min_seq_len: prompt_tokens length lesser than this will be discarded.
             max_seq_len: prompt_tokens length greater than this will be discarded.
-            max_samples: maximum number of samples to include.
+            max_samples: maximum number of samples to include, default 0 no limit.
         """
 
         assert len(data_sources) > 0
         assert min_seq_len >= 6
         assert max_seq_len > 128
         assert min_seq_len <= max_seq_len
+        assert max_samples >= 0
 
         self.data_sources = data_sources
         self.min_seq_len = min_seq_len
@@ -375,8 +374,6 @@ class PromptOnlyDataset(Dataset):
 
         self.data = []
 
-        seq_length_stats = []  # track statistics
-
         # Load datasets
         for source in data_sources:
             samples = pickle.load(open(source, 'rb'))
@@ -385,7 +382,16 @@ class PromptOnlyDataset(Dataset):
                 seq_length = len(x)
                 if seq_length >= self.min_seq_len and seq_length <= self.max_seq_len:
                     self.data.append(x)
-                    seq_length_stats.append(seq_length)
+
+        if self.max_samples > 0 and len(self.data) > self.max_samples:
+            random.shuffle(self.data)
+            self.data = self.data[: self.max_samples]
+
+        seq_length_stats = []  # track statistics
+
+        for item in self.data:
+            x = item
+            seq_length_stats.append(len(x))
 
         self.total_num_tokens = sum(seq_length_stats)
         self.seq_length_stats = {
@@ -395,19 +401,10 @@ class PromptOnlyDataset(Dataset):
             'std': int(np.std(seq_length_stats)),
         }
 
-        if len(self.data) > self.max_samples:
-            self.shuffle()
-            self.data = self.data[: self.max_samples]
-
         self.num_samples = len(self.data)
-
-        self.shuffle()
 
     def __len__(self):
         return len(self.data)
-
-    def shuffle(self):
-        random.shuffle(self.data)
 
     def sample(self, size: int = 1) -> List[List[int]]:
         indices = self.random_state.randint(low=0, high=self.num_samples, size=size)

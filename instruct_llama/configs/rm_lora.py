@@ -17,8 +17,8 @@ class config:
     # RM model is special because we need to maintain >=2 graphs when computing loss, which requires more GPU RAM
     max_seq_len: int = 512
 
-    rm_ckpt_file: str = './merged_checkpoints/7b-sft/iter-600-merged.pth'  # load fine-tuned checkpoint
-    tokenizer_file: str = './meta_checkpoints/tokenizer.model'  # load tokenizer model
+    rm_ckpt_file: str = './checkpoints/7b-sft/steps-1400-merged.pth'  # load fine-tuned checkpoint
+    tokenizer_file: str = '/home/michael/models/meta_llama2/tokenizer.model'  # load tokenizer model
 
     random_head_weights: bool = True
 
@@ -41,10 +41,10 @@ class config:
     # training and validation loops
     num_epochs: int = 5
     # we always use micro batch size of 1 (sample) during training and evaluation
-    gradient_accum_steps: int = 64
+    gradient_accum_steps: int = 128
     val_interval: int = 200  # this also decides how often we create model checkpoints
     val_steps: int = 200
-    log_interval: int = 10  # log training metrics (loss, accuracy)
+    log_interval: int = 5  # log training metrics (loss, accuracy)
     ckpt_interval: int = 200  # save model checkpoints every N training iterations
 
     # whether normalize reward before compute loss during training and validation
@@ -75,21 +75,23 @@ class config:
     # learning rate scheduler
     init_lr: float = 5e-5  # initial learning rate
     max_lr: float = 5e-4  # max learning rate after warm up
-    min_lr: float = 2e-4  # min learning rate after decay
+    min_lr: float = 3e-4  # min learning rate after decay
     warmup_ratio: float = 0.03
 
     # AdamW optimizer
-    use_paged_adamw: bool = True  # need this if using 4bit quantization
+    use_paged_adamw: bool = False  # need this if using 4bit quantization
     weight_decay: float = 0.0
     adam_betas: Tuple = (0.9, 0.95)
     adam_eps: float = 1e-5
     adam_fused: bool = False  # only applicable if not using bitsandbytes optimizer
-    grad_clip: float = 2.0
+    grad_clip: float = 0.0
 
     # dropout regularization
     embed_dropout: float = 0.0
     attn_dropout: float = 0.1
     resid_dropout: float = 0.1
+
+    gradient_checkpointing: bool = True
 
     mixed_precision: bool = True  # default to BF16, but if no native GPU support detected, will use FP16.
     compile_model: bool = False  # not working with QLoRA

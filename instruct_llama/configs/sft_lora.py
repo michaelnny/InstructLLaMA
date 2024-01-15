@@ -4,7 +4,7 @@
 
 
 from typing import Tuple
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 
 
 @dataclass
@@ -15,20 +15,22 @@ class config:
     model_type: str = '7B'  # 7B, 13B, 70B
     max_seq_len: int = 512  # use smaller sequence length to save GPU RAM
 
-    pretrain_ckpt_file: str = './meta_checkpoints/llama-2-7b/consolidated.pth'  # load pretrained checkpoint
-    tokenizer_file: str = './meta_checkpoints/tokenizer.model'  # load tokenizer model
+    pretrain_ckpt_file: str = '/home/michael/models/meta_llama2/llama-2-7b/consolidated.pth'  # load pretrained checkpoint
+    tokenizer_file: str = '/home/michael/models/meta_llama2/tokenizer.model'  # load tokenizer model
 
     # datasets
     train_datasources: Tuple[str] = (
         './datasets/dolly/train.pkl',
         './datasets/alpaca/train.pkl',
         './datasets/squad/train.pkl',
+        './datasets/deepmind_mathematics/train.pkl',
         './datasets/commonsense_dialogues/train.pkl',
     )
     val_datasources: Tuple[str] = (
         './datasets/dolly/validation.pkl',
         './datasets/alpaca/validation.pkl',
         './datasets/squad/validation.pkl',
+        './datasets/deepmind_mathematics/validation.pkl',
         './datasets/commonsense_dialogues/validation.pkl',
     )
     dataloader_workers: int = 1
@@ -39,30 +41,30 @@ class config:
     full_pad: bool = False
 
     # training and validation loops
-    num_epochs: int = 3
+    num_epochs: int = 5
     # accumulate gradients so for each iteration, the actual batch size is = train_batch_size x gradient_accum_steps
-    train_batch_size: int = 2
-    gradient_accum_steps: int = 64
+    train_batch_size: int = 4
+    gradient_accum_steps: int = 32
     val_interval: int = 200
     val_batch_size: int = 30
     val_steps: int = 20
-    log_interval: int = 10  # log training metrics (loss, accuracy)
+    log_interval: int = 5  # log training metrics (loss, accuracy)
     ckpt_interval: int = 200  # save model checkpoints every N training iterations
 
     # LoRA configuration
-    lora_r: int = 64
+    lora_r: int = 128
     lora_scaling: float = 1.0  # we don't use alpha here, instead directly set the scaling
     lora_dropout: float = 0.0
 
     # LoRA trainable layers
     lora_attn_query: bool = True  # train Attention query layer
-    lora_attn_key: bool = False  # train Attention key layer
+    lora_attn_key: bool = True  # train Attention key layer
     lora_attn_value: bool = True  # train Attention value layer
-    lora_attn_proj: bool = False  # train Attention projection layer
-    lora_attn_mlp: bool = False  # train Attention MLP block
+    lora_attn_proj: bool = True  # train Attention projection layer
+    lora_attn_mlp: bool = True  # train Attention MLP block
 
     train_bias: str = 'none'  # none, lora_only, all
-    train_head: bool = False  # note we don't apply LoRA to model output head
+    train_head: bool = True  # note we don't apply LoRA to model output head
 
     # Quantization
     quant_4bit: bool = False  # quantize frozen linear layer
@@ -72,8 +74,8 @@ class config:
 
     # learning rate
     init_lr: float = 5e-5  # initial learning rate
-    max_lr: float = 3e-4  # max learning rate after warm up
-    min_lr: float = 1e-4  # min learning rate after decay
+    max_lr: float = 5e-4  # max learning rate after warm up
+    min_lr: float = 3e-4  # min learning rate after decay
     warmup_ratio: float = 0.03
 
     # prompt is less important than completion
@@ -93,6 +95,7 @@ class config:
     attn_dropout: float = 0.1
     resid_dropout: float = 0.1
 
+    gradient_checkpointing: bool = True
     mixed_precision: bool = True  # default to BF16, but if no native GPU support detected, will use FP16.
     compile_model: bool = False  # not working with QLoRA
 

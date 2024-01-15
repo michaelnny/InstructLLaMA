@@ -1,3 +1,8 @@
+# Copyright (c) 2023 Michael Hu.
+# This project is released under the MIT License.
+# See the accompanying LICENSE file for details.
+
+
 from typing import Dict
 import numpy as np
 
@@ -9,10 +14,10 @@ class StatsTracker:
     """Tracker for LLM model during fine-tune"""
 
     def __init__(self, distributed: bool = False, rank=0):
-        self.metrics = torch.zeros(5).to(rank if distributed else 'cpu')
-        self.c = 0
-
         self.distributed = distributed
+        self.rank = rank
+
+        self.reset()
 
     def update(self, loss: torch.Tensor, num_accurate: int, num_samples: int):
         metrics = self.metrics
@@ -26,7 +31,7 @@ class StatsTracker:
         self.c += 1
 
     def reset(self) -> None:
-        self.metrics = torch.zeros(5)
+        self.metrics = torch.zeros(5).to(f'cuda:{self.rank}' if self.distributed else 'cuda')
         self.c = 0
 
     def get_dict(self) -> Dict:
@@ -49,10 +54,10 @@ class RMStatsTracker:
     """Tracker for reward model"""
 
     def __init__(self, distributed: bool = False, rank=0):
-        self.metrics = torch.zeros(6).to(rank if distributed else 'cpu')
-        self.c = 0
-
         self.distributed = distributed
+        self.rank = rank
+
+        self.reset()
 
     def update(self, loss: torch.Tensor, num_accurate: int, num_samples: int, reward_best: float, reward_worst: float):
         metrics = self.metrics
@@ -67,7 +72,7 @@ class RMStatsTracker:
         self.c += 1
 
     def reset(self) -> None:
-        self.metrics = torch.zeros(6)
+        self.metrics = torch.zeros(6).to(f'cuda:{self.rank}' if self.distributed else 'cuda')
         self.c = 0
 
     def get_dict(self) -> Dict:

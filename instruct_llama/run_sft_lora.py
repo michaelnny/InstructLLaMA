@@ -14,7 +14,7 @@ import numpy as np
 
 import torch
 from torch.nn import functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, RandomSampler
 from torch.utils.tensorboard import SummaryWriter
 
 # support running without installing as a package
@@ -324,6 +324,7 @@ def main():
         embed_dropout=cfg.embed_dropout,
         attn_dropout=cfg.attn_dropout,
         resid_dropout=cfg.resid_dropout,
+        gradient_checkpointing=cfg.gradient_checkpointing,
     )
 
     model = Transformer(model_args)

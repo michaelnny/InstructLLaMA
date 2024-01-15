@@ -27,9 +27,9 @@ class config:
     # model type definition, the details (number of layers, heads etc.) are defined in model.py
     model_type: str = '1B'  # 7B, 13B, 70B
     head_type: str = 'lm_head'
-    max_seq_len: int = 1024  # use smaller sequence length to save GPU RAM
+    max_seq_len: int = 512  # use smaller sequence length to save GPU RAM
 
-    tokenizer_file: str = './meta_checkpoints/tokenizer.model'  # load tokenizer model
+    tokenizer_file: str = '/home/michael/models/meta_llama2/tokenizer.model'  # load tokenizer model
 
     # datasets
     train_datasources: Tuple[DataSource] = (
@@ -54,17 +54,17 @@ class config:
     num_epochs: int = 5
     # accumulate gradients so for each iteration, the actual batch size is = train_batch_size x gradient_accum_steps
     train_batch_size: int = 4
-    gradient_accum_steps: int = 30
-    val_interval: int = 500
+    gradient_accum_steps: int = 32
+    val_interval: int = 1000
     val_batch_size: int = 30
     val_steps: int = 20
-    log_interval: int = 10  # log training metrics (loss, accuracy)
-    ckpt_interval: int = 500  # save model checkpoints every N training iterations
+    log_interval: int = 5  # log training metrics (loss, accuracy)
+    ckpt_interval: int = 1000  # save model checkpoints every N training iterations
 
     # learning rate
-    init_lr: float = 1e-5  # initial learning rate
+    init_lr: float = 5e-6  # initial learning rate
     max_lr: float = 5e-5  # max learning rate after warm up
-    min_lr: float = 1e-5  # min learning rate after decay
+    min_lr: float = 2e-5  # min learning rate after decay
     warmup_ratio: float = 0.05
 
     # AdamW optimizer

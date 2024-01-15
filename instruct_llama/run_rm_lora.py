@@ -324,7 +324,7 @@ def main():
         'num_workers': 1,
         'batch_size': 1,  # always work on one sample at a time
         'pin_memory': False,
-        'shuffle': True,
+        'shuffle': False,
         'sampler': None,
     }
 
@@ -339,7 +339,7 @@ def main():
         val_loader = DataLoader(dataset=val_dataset, collate_fn=_collate_fn, **cuda_kwargs)
         logger.info(f'Validation dataset metadata:\n{val_dataset.get_metadata()}')
 
-    batch_size = int(cfg.train_batch_size * cfg.gradient_accum_steps)
+    batch_size = int(cfg.gradient_accum_steps)
     steps_per_epoch = len(train_loader) // cfg.gradient_accum_steps
     max_train_steps = steps_per_epoch * cfg.num_epochs
 
@@ -386,6 +386,7 @@ def main():
         embed_dropout=cfg.embed_dropout,
         attn_dropout=cfg.attn_dropout,
         resid_dropout=cfg.resid_dropout,
+        gradient_checkpointing=cfg.gradient_checkpointing,
     )
 
     model = Transformer(model_args)
@@ -399,7 +400,7 @@ def main():
         del model_state
 
     if cfg.random_head_weights:
-        model.init_head_weights()
+        init_head_weights(model)
 
     # try to convert the model to half precision, otherwise we can't even move the 7B model to a single RTX 3090
     for name, module in model.named_modules():

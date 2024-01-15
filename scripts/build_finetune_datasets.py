@@ -315,7 +315,7 @@ def process_deepmind_math_dataset(
     tokenizer: Tokenizer,
     filter_by_names=[],  # only include files matching the keys defined here, if empty all files will be used
     num_workers=8,
-    max_num_sample=20000,  # limit total amount of samples to avoid imbalanced training data
+    max_samples=20000,  # limit total amount of samples to avoid imbalanced training data
     validation_ratio=0.05,
     overwrite_output: bool = False,
     metadata: Metadata = {
@@ -404,12 +404,12 @@ def process_deepmind_math_dataset(
     metadata['vocab_size'] = tokenizer.vocab_size
     metadata['data_structure'] = 'A list of prompt:completion token sequences pairs.'
 
-    if len(datasets) > max_num_sample:
-        logger.info(f'Truncate data to max size of {max_num_sample}')
+    if len(datasets) > max_samples:
+        logger.info(f'Truncate data to max size of {max_samples}')
         random.shuffle(datasets)
         random.shuffle(datasets)
         random.shuffle(datasets)
-        datasets = datasets[:max_num_sample]
+        datasets = datasets[:max_samples]
 
     logger.info('Saving processed DeepMind Mathematics dataset ...')
     _split_and_save_datasets(
@@ -760,7 +760,7 @@ if __name__ == '__main__':
     torch.manual_seed(seed)
     random.seed(seed)
 
-    tokenizer = Tokenizer(model_path='./meta_checkpoints/tokenizer.model')
+    tokenizer = Tokenizer(model_path='/home/michael/models/meta_llama2/tokenizer.model')
 
     process_dolly_dataset(
         src_file='/home/michael/datasets/dolly_15k/databricks-dolly-15k.jsonl',
@@ -786,20 +786,21 @@ if __name__ == '__main__':
         tokenizer=tokenizer,
     )
 
+    process_deepmind_math_dataset(
+        src_dirs=['/home/michael/datasets/mathematics_dataset-v1.0/train-easy'],
+        output_dir='./datasets/deepmind_mathematics',
+        tokenizer=tokenizer,
+        max_samples=20000,
+        filter_by_names=[
+            'arithmetic__add_or_sub.txt',
+            'arithmetic__add_sub_multiple.txt',
+            'arithmetic__div.txt',
+            'arithmetic__mul.txt',
+        ],
+    )
+
     # process_msc_dialog_dataset(
     #     src_dir='./raw_data/msc_dialogue',
     #     output_dir='./datasets/msc_dialogue',
     #     tokenizer=tokenizer,
-    # )
-
-    # process_deepmind_math_dataset(
-    #     src_dirs=['./raw_data/deepmind_mathematics/train-easy'],
-    #     output_dir='./datasets/deepmind_mathematics',
-    #     tokenizer=tokenizer,
-    #     filter_by_names=[
-    #         'arithmetic__add_or_sub.txt',
-    #         'arithmetic__add_sub_multiple.txt',
-    #         'arithmetic__div.txt',
-    #         'arithmetic__mul.txt',
-    #     ],
     # )

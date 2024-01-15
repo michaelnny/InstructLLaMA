@@ -14,11 +14,13 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 
 logger = logging.getLogger(__name__)
 
 # llama 2 models
 llama_configs = {
+    '1B': dict(n_layers=16, n_heads=16, dim=2048),  # for code testing only
     '3B': dict(n_layers=16, n_heads=32, dim=4096),  # for RM model
     '7B': dict(n_layers=32, n_heads=32, dim=4096),
     '13B': dict(n_layers=40, n_heads=40, dim=5120),
@@ -52,6 +54,9 @@ class ModelArgs:
     embed_dropout: float = 0.0
     attn_dropout: float = 0.0
     resid_dropout: float = 0.0
+
+    # others
+    gradient_checkpointing: bool = False
 
     def __post_init__(self):
         assert self.head_type in ('lm_head', 'scalar_head')
@@ -341,7 +346,10 @@ class Transformer(nn.Module):
             mask = torch.triu(mask, diagonal=start_pos + 1).type_as(h)
 
         for layer in self.layers:
-            h = layer(h, start_pos, freqs_cis, mask)
+            if self.params.gradient_checkpointing and self.training:
+                h = checkpoint(layer, h, start_pos, freqs_cis, mask, use_reentrant=False)
+            else:
+                h = layer(h, start_pos, freqs_cis, mask)
         h = self.post_norm(h)
 
         if self.params.head_type == 'lm_head':
