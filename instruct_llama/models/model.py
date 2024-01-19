@@ -44,7 +44,7 @@ class ModelArgs:
     ffn_dim_multiplier: Optional[float] = None
     norm_eps: float = 1e-5
 
-    max_batch_size: int = 8
+    max_batch_size: int = 8  # for attention key, value caches
     max_seq_len: int = 2048
 
     head_type: str = 'lm_head'  # 'lm_head', 'scalar_head'

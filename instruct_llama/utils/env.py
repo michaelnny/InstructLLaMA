@@ -52,8 +52,8 @@ class PromptEnv:
         return self.dataset.sample(batch_size)
 
     @torch.no_grad()
-    def step(self, prompt_completions: torch.Tensor, terminal_steps: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Returns the raw environment rewards and normalized (clipped) environment rewards for the given prompt-completion pairs"""
+    def step(self, prompt_completions: torch.Tensor, terminal_steps: torch.Tensor) -> torch.Tensor:
+        """Returns the normalized and clipped environment rewards for the given prompt-completion pairs"""
 
         assert len(prompt_completions) == len(terminal_steps)
 
@@ -64,18 +64,16 @@ class PromptEnv:
 
         # get rewards for terminal step, where sequence ends with EOS token, or reached maximum seq_length
         env_rewards = torch.gather(outputs, dim=1, index=terminal_steps.unsqueeze(-1)).squeeze(1)  # [batch_size]
-
+        raw_env_rewards = env_rewards.clone().cpu()
         if self.normalize_reward:
-            normed_env_rewards = self.normalizer.normalize(env_rewards, False)
-        else:
-            normed_env_rewards = env_rewards.clone()
-
-        self.normalizer.update(env_rewards)
+            env_rewards = self.normalizer.normalize(env_rewards, False)
 
         if self.clip_reward_fn is not None:
-            normed_env_rewards = self.clip_reward_fn(normed_env_rewards)
+            env_rewards = self.clip_reward_fn(env_rewards)
 
-        return env_rewards, normed_env_rewards
+        self.normalizer.update(raw_env_rewards)
+
+        return env_rewards
 
     @torch.no_grad()
     def compute_kl_penalties(

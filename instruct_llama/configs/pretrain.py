@@ -55,6 +55,7 @@ class config:
     # accumulate gradients so for each iteration, the actual batch size is = train_batch_size x gradient_accum_steps
     train_batch_size: int = 4
     gradient_accum_steps: int = 32
+    loss_scale: float = 1.0 / 16  # scale loss to account for gradient accumulation, we don't want to use a very small scale
     val_interval: int = 1000
     val_batch_size: int = 30
     val_steps: int = 20
@@ -64,11 +65,11 @@ class config:
     # learning rate
     init_lr: float = 5e-6  # initial learning rate
     max_lr: float = 5e-5  # max learning rate after warm up
-    min_lr: float = 2e-5  # min learning rate after decay
-    warmup_ratio: float = 0.05
+    min_lr: float = 5e-6  # min learning rate after decay
+    warmup_ratio: float = 0.1
 
     # AdamW optimizer
-    weight_decay: float = 0.001
+    weight_decay: float = 0.01
     adam_betas: Tuple = (0.9, 0.95)
     adam_eps: float = 1e-5
     adam_fused: bool = True

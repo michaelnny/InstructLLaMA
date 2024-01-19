@@ -5,7 +5,6 @@
 
 """Run pre-training without using any previous model weights."""
 import os
-import itertools
 import math
 from typing import Tuple, Mapping, Text, Any
 import tqdm
@@ -169,13 +168,13 @@ def train_step(
     model: Transformer,
     batch: Tuple[torch.Tensor],
     scaler: ShardedGradScaler,
-    gradient_accum_steps: int,
+    loss_scale: float,
     local_rank: int,
     tracker: StatsTracker,
 ) -> None:
     """Run a single training step, where we do a forward + backward passes, but do no update parameters"""
 
-    assert gradient_accum_steps >= 1
+    assert loss_scale > 0
 
     x, y = batch
     x, y = (
@@ -188,7 +187,7 @@ def train_step(
     loss = compute_pre_train_loss(output, y)
 
     # scale the loss to account for gradient accumulation
-    scaled_loss = loss / gradient_accum_steps
+    scaled_loss = loss * loss_scale
 
     if scaler is not None:  # when using float16
         scaler.scale(scaled_loss).backward()
@@ -282,6 +281,7 @@ def init_weights(model: Transformer) -> None:
 def fsdp_main():
     assert cfg.train_batch_size >= 1
     assert cfg.gradient_accum_steps >= 1
+    assert 0 < cfg.loss_scale <= 1
     assert cfg.log_interval >= 1
     assert cfg.val_interval >= 0
     assert cfg.val_steps >= 1
@@ -455,7 +455,7 @@ def fsdp_main():
         val_tracker.reset()
 
         for iter, batch in enumerate(train_loader):  # for each batch in current epoch
-            train_step(model, batch, scaler, cfg.gradient_accum_steps, local_rank, train_tracker)
+            train_step(model, batch, scaler, cfg.loss_scale, local_rank, train_tracker)
 
             if iter % cfg.gradient_accum_steps == 0:
                 grad_norm = get_grad_norm_fsdp(model, rank, world_size, cfg.sharding_strategy)

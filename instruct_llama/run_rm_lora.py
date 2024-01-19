@@ -138,14 +138,13 @@ def train_step(
     batch: Tuple[torch.Tensor],
     scaler: torch.cuda.amp.GradScaler,
     reward_stats: RunningMeanStd,
-    gradient_accum_steps: int,
+    loss_scale: float,
     normalize_reward: bool,
     max_abs_reward: float,
     tracker: RMStatsTracker,
 ) -> None:
     """Run a single training step, where we do a forward + backward passes, but do no update parameters"""
-
-    assert gradient_accum_steps >= 1
+    assert loss_scale > 0
 
     batch_tokens, terminal_steps = batch
     batch_tokens = batch_tokens.to('cuda', non_blocking=True)
@@ -161,12 +160,11 @@ def train_step(
         rewards = reward_stats.normalize(rewards)
     if max_abs_reward > 0:
         rewards = rewards.clamp(min=-max_abs_reward, max=max_abs_reward)
-
     # compute loss in a single go
     loss = compute_rm_comparison_loss(rewards)
 
     # scale the loss to account for gradient accumulation
-    scaled_loss = loss / gradient_accum_steps
+    scaled_loss = loss * loss_scale
 
     if scaler is not None:  # when using float16
         scaler.scale(scaled_loss).backward()
@@ -296,6 +294,7 @@ def init_head_weights(model: Transformer):
 def main():
     assert cfg.num_epochs >= 1
     assert cfg.gradient_accum_steps >= 1
+    assert 0 < cfg.loss_scale <= 1
     assert cfg.log_interval >= 1
     assert cfg.val_interval >= 0
     assert cfg.val_steps >= 1
@@ -324,7 +323,7 @@ def main():
         'num_workers': 1,
         'batch_size': 1,  # always work on one sample at a time
         'pin_memory': False,
-        'shuffle': False,
+        'shuffle': True,
         'sampler': None,
     }
 
@@ -485,7 +484,7 @@ def main():
                 batch,
                 scaler,
                 reward_stats,
-                cfg.gradient_accum_steps,
+                cfg.loss_scale,
                 cfg.normalize_reward,
                 cfg.max_abs_reward,
                 train_tracker,

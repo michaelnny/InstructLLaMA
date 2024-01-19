@@ -137,26 +137,26 @@ if __name__ == '__main__':
     # fine-tuned model
     merge_lora_checkpoint(
         base_ckpt_path='/home/michael/models/meta_llama2/llama-2-7b/consolidated.pth',
-        lora_ckpt_path='./checkpoints/sft_lora/lora_7B-steps-1400.pth',
-        save_path='./checkpoints/7b-sft/steps-1400-merged.pth',
+        lora_ckpt_path='./checkpoints/sft_lora/lora_7B-steps-2200.pth',
+        save_path='./checkpoints/7b-sft/steps-2200-merged.pth',
     )
 
-    # # RM model
-    # merge_lora_checkpoint(
-    #     base_ckpt_path='./merged_checkpoints/7b-sft/iter-600-merged.pth',
-    #     lora_ckpt_path='./checkpoints/rm_lora/lora_3B-iter-4300.pth',
-    #     save_path='./merged_checkpoints/3b-rm/iter-4300-merged.pth',
-    # )
+    # RM model
+    merge_lora_checkpoint(
+        base_ckpt_path='./checkpoints/7b-sft/steps-2200-merged.pth',
+        lora_ckpt_path='./checkpoints/rm_lora/lora_3B-steps-2200.pth',
+        save_path='./checkpoints/3b-rm/steps-2200-merged.pth',
+    )
 
-    # # PPO models
-    # merge_lora_checkpoint(
-    #     base_ckpt_path='./merged_checkpoints/7b-sft/iter-600-merged.pth',
-    #     lora_ckpt_path='./checkpoints/rlhf_lora/policy/lora_7B-epoch-40.pth',
-    #     save_path='./merged_checkpoints/7b-rlhf/policy-epoch-40-merged.pth',
-    # )
+    # PPO models
+    merge_lora_checkpoint(
+        base_ckpt_path='./checkpoints/7b-sft/steps-2200-merged.pth',
+        lora_ckpt_path='./checkpoints/rlhf_lora/policy/lora_7B-epoch-20.pth',
+        save_path='./checkpoints/7b-rlhf/policy-epoch-20-merged.pth',
+    )
 
-    # merge_lora_checkpoint(
-    #     base_ckpt_path='./merged_checkpoints/3b-rm/iter-4300-merged.pth',
-    #     lora_ckpt_path='./checkpoints/rlhf_lora/value/lora_3B-epoch-40.pth',
-    #     save_path='./merged_checkpoints/3b-rlhf/value-epoch-40-merged.pth',
-    # )
+    merge_lora_checkpoint(
+        base_ckpt_path='./checkpoints/3b-rm/steps-2200-merged.pth',
+        lora_ckpt_path='./checkpoints/rlhf_lora/value/lora_3B-epoch-20.pth',
+        save_path='./checkpoints/3b-rlhf/value-epoch-20-merged.pth',
+    )

@@ -15,12 +15,6 @@ import numpy as np
 import torch
 from torch import nn
 
-# # support running without installing as a package
-# from pathlib import Path
-# import sys
-
-# wd = Path(__file__).parent.parent.parent.resolve()
-# sys.path.append(str(wd))
 
 import instruct_llama.models.model as llama
 from instruct_llama.models.lora import LoRALinear, LoRALinear4bit, Linear4bit
@@ -88,65 +82,63 @@ def _get_linear_layer(params: LoraModelArgs) -> Union[nn.Linear, Linear4bit]:
     return partial(layer_cls, **kwargs)
 
 
-class Attention(llama.Attention):
-    def __init__(self, params: LoraModelArgs) -> None:
-        """Attention with training q, v weights using Low Ranking Adaptation for
-        parameter-efficient fine-tuning, and keep k, o fixed.
+def get_linear_layer(
+    params: LoraModelArgs, use_lora: bool = False
+) -> Union[nn.Linear, Linear4bit, LoRALinear, LoRALinear4bit]:
+    if use_lora:
+        return _get_lora_linear_layer(params)
+    else:
+        return _get_linear_layer(params)
 
-        Args:
-            params:
-                ``"max_seq_len"``: size of the context of the model,
-                ``"vocab_size"``: number of unique tokens,
-                ``"n_layers"``: number of transformer blocks (self-attention + MLP),
-                ``"n_heads"``: number of heads in multi-head attention mechanism,
-                ``"dim"``: size of the embedding: vector representation of each token.
-        """
+
+class Attention(llama.Attention):
+    def __init__(self, args: LoraModelArgs):
         # Skip the parent class __init__ altogether and replace it to avoid
         # useless allocations
         nn.Module.__init__(self)
-        self.max_batch_size = params.max_batch_size
-        self.max_seq_len = params.max_seq_len
-        self.n_heads = params.n_heads
-        self.head_dim = params.dim // params.n_heads
+        self.max_batch_size = args.max_batch_size
+        self.max_seq_len = args.max_seq_len
+        self.n_heads = args.n_heads
+        self.head_dim = args.dim // args.n_heads
 
-        lora_linear_cls = _get_lora_linear_layer(params)
-        linear_cls = _get_linear_layer(params)
-
-        query_layer_cls = lora_linear_cls if params.lora_attn_query else linear_cls
-        key_layer_cls = lora_linear_cls if params.lora_attn_key else linear_cls
-        value_layer_cls = lora_linear_cls if params.lora_attn_value else linear_cls
-        proj_layer_cls = lora_linear_cls if params.lora_attn_proj else linear_cls
+        query_layer_cls = get_linear_layer(args, args.lora_attn_query)
+        key_layer_cls = get_linear_layer(args, args.lora_attn_key)
+        value_layer_cls = get_linear_layer(args, args.lora_attn_value)
+        proj_layer_cls = get_linear_layer(args, args.lora_attn_proj)
 
         self.wq = query_layer_cls(
-            params.dim,
-            params.n_heads * self.head_dim,
+            args.dim,
+            args.n_heads * self.head_dim,
             bias=False,
         )
 
         self.wk = key_layer_cls(
-            params.dim,
+            args.dim,
             self.n_heads * self.head_dim,
             bias=False,
         )
         self.wv = value_layer_cls(
-            params.dim,
+            args.dim,
             self.n_heads * self.head_dim,
             bias=False,
         )
         self.wo = proj_layer_cls(
-            params.n_heads * self.head_dim,
-            params.dim,
+            args.n_heads * self.head_dim,
+            args.dim,
             bias=False,
         )
 
-        self.use_cache = params.use_cache
+        self.use_cache = args.use_cache
 
         self.cache_k = None
         self.cache_v = None
+        if self.use_cache:
+            self.cache_k = torch.zeros((self.max_batch_size, self.max_seq_len, self.n_heads, self.head_dim))
+            self.cache_v = torch.zeros((self.max_batch_size, self.max_seq_len, self.n_heads, self.head_dim))
 
         # regularization
-        self.attn_dropout = nn.Dropout(params.attn_dropout) if params.attn_dropout > 0 else nn.Identity()
-        self.resid_dropout = nn.Dropout(params.resid_dropout) if params.resid_dropout > 0 else nn.Identity()
+        self.attn_dropout = nn.Dropout(args.attn_dropout) if args.attn_dropout > 0 else nn.Identity()
+        self.resid_dropout = nn.Dropout(args.resid_dropout) if args.resid_dropout > 0 else nn.Identity()
 
 
 class FeedForward(llama.FeedForward):
@@ -157,7 +149,7 @@ class FeedForward(llama.FeedForward):
         multiple_of: int,
         ffn_dim_multiplier: Optional[float],
         resid_dropout: Optional[float],
-        params: LoraModelArgs,
+        args: LoraModelArgs,
     ):
         nn.Module.__init__(self)
         hidden_dim = int(2 * hidden_dim / 3)
@@ -166,10 +158,7 @@ class FeedForward(llama.FeedForward):
             hidden_dim = int(ffn_dim_multiplier * hidden_dim)
         hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
-        if params.lora_attn_mlp:
-            layer_cls = _get_lora_linear_layer(params)
-        else:
-            layer_cls = _get_linear_layer(params)
+        layer_cls = get_linear_layer(args, args.lora_attn_mlp)
 
         self.w1 = layer_cls(dim, hidden_dim, bias=False)
         self.w2 = layer_cls(hidden_dim, dim, bias=False)
@@ -179,24 +168,24 @@ class FeedForward(llama.FeedForward):
 
 
 class TransformerBlock(llama.TransformerBlock):
-    def __init__(self, layer_id: int, params: LoraModelArgs):
+    def __init__(self, layer_id: int, args: LoraModelArgs):
         nn.Module.__init__(self)
         self.layer_id = layer_id
-        self.n_heads = params.n_heads
-        self.dim = params.dim
-        self.head_dim = params.dim // params.n_heads
+        self.n_heads = args.n_heads
+        self.dim = args.dim
+        self.head_dim = args.dim // args.n_heads
 
-        self.attention = Attention(params)
+        self.attention = Attention(args)
         self.feed_forward = FeedForward(
-            dim=params.dim,
-            hidden_dim=4 * params.dim,
-            multiple_of=params.multiple_of,
-            ffn_dim_multiplier=params.ffn_dim_multiplier,
-            resid_dropout=params.resid_dropout,
-            params=params,
+            dim=args.dim,
+            hidden_dim=4 * args.dim,
+            multiple_of=args.multiple_of,
+            ffn_dim_multiplier=args.ffn_dim_multiplier,
+            resid_dropout=args.resid_dropout,
+            args=args,
         )
-        self.attention_norm = llama.RMSNorm(params.dim, eps=params.norm_eps)
-        self.ffn_norm = llama.RMSNorm(params.dim, eps=params.norm_eps)
+        self.attention_norm = llama.RMSNorm(args.dim, eps=args.norm_eps)
+        self.ffn_norm = llama.RMSNorm(args.dim, eps=args.norm_eps)
 
 
 class Transformer(llama.Transformer):

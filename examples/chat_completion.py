@@ -64,6 +64,12 @@ These are just a few of the many attractions that Paris has to offer. With so mu
             {'role': 'user', 'content': 'Explain what is the theory of relativity.'},
         ],
         [
+            {'role': 'user', 'content': 'Solve 351+24=.'},
+        ],
+        [
+            {'role': 'user', 'content': 'Solve 45-128=. Just give me the answer, no explanation.'},
+        ],
+        [
             {'role': 'user', 'content': 'Explain moon landing to a 8 years old kid.'},
         ],
         [
@@ -112,7 +118,7 @@ These are just a few of the many attractions that Paris has to offer. With so mu
 if __name__ == '__main__':
     main(
         # ckpt_path="/home/michael/models/meta_llama2/llama-2-7b-chat/consolidated.pth",  # Meta fine-tuned chat model
-        ckpt_path='./checkpoints/7b-sft/steps-1400-merged.pth',  # our fine-tuned chat model
-        # ckpt_path='./merged_checkpoints/7b-rlhf/policy-epoch-40-merged.pth',  # our RL trained chat model
+        # ckpt_path='./checkpoints/7b-sft/steps-2200-merged.pth',  # our fine-tuned chat model
+        ckpt_path='./checkpoints/7b-rlhf/policy-epoch-20-merged.pth',  # our RL trained chat model
         tokenizer_path='/home/michael/models/meta_llama2/tokenizer.model',
     )

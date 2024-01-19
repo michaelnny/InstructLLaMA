@@ -102,10 +102,12 @@ def train_step(
     model: Transformer,
     batch: Tuple[torch.Tensor],
     scaler: torch.cuda.amp.GradScaler,
-    gradient_accum_steps: int,
+    loss_scale: float,
     tracker: StatsTracker,
 ) -> None:
     """Run a single training step, where we do a forward + backward passes, but do no update parameters"""
+
+    assert loss_scale > 0
 
     x, y, loss_mask = batch
     x, y, loss_mask = (
@@ -119,7 +121,7 @@ def train_step(
     loss = compute_finetune_loss(output, y, loss_mask)
 
     # scale the loss to account for gradient accumulation
-    scaled_loss = loss / gradient_accum_steps
+    scaled_loss = loss * loss_scale
 
     if scaler is not None:  # when using float16
         scaler.scale(scaled_loss).backward()
@@ -232,6 +234,7 @@ def main():
     assert cfg.num_epochs >= 1
     assert cfg.train_batch_size >= 1
     assert cfg.gradient_accum_steps >= 1
+    assert 0 < cfg.loss_scale <= 1
     assert cfg.log_interval >= 1
     assert cfg.val_interval >= 0
     assert cfg.val_steps >= 1
@@ -415,7 +418,7 @@ def main():
         val_tracker.reset()
 
         for iter, batch in enumerate(train_loader):  # for each batch in current epoch
-            train_step(model, batch, scaler, cfg.gradient_accum_steps, train_tracker)
+            train_step(model, batch, scaler, cfg.loss_scale, train_tracker)
 
             if iter % cfg.gradient_accum_steps == 0:
                 grad_norm = get_grad_norm_local(model)

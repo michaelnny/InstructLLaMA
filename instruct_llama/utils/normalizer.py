@@ -49,4 +49,4 @@ class RunningMeanStd:
     def load_state_dict(self, state_dict):
         self.mean = state_dict['mean']
         self.var = state_dict['var']
-        self.count = state_dict['count']
+        # self.count = state_dict['count']

@@ -86,8 +86,8 @@ We use a slightly modified LoRALayer class, where we set the scaling directly in
 
 ```
 lora_r: int = 64
-lora_scaling: float = 1.0  # we don't use alpha here, instead directly set the scaling
-lora_dropout: float = 0.05
+lora_scaling: float = 1.0  # set the LoRA scaling, by default 1.0 no scaling
+lora_dropout: float = 0.0
 ```
 
 ### Trainable layers
@@ -121,7 +121,7 @@ quant_4bit_type: str = 'nf4'  # only supports 'fp4' or 'nf4'
 
 ## Merge LoRA weights
 
-Since we're using LoRA method, when the training is done (for each stage), we need to merge the LoRA weights with the pre-trained or fine-tuned model weights. Which can be summarized into the following steps:
+Since we're using LoRA method, when the training is done (for each stage except pre-training), we need to merge the LoRA weights with the pre-trained or fine-tuned model weights. Which can be summarized into the following steps:
 
 1. Construct a model with LoRA layers, matching the configuration used in fine-tuning but without quantized layers.
 2. Load the pre-trained or fine-tuned weights.
@@ -203,7 +203,7 @@ Here's an overview of the models involved in this stage:
 
 As we need to run multiple models at the same time, this demands more GPU resource than any of the previous stages. If you have multiple GPUs then you can set the model devices inside the `instruct_llama/configs/rlhf_lora.py` module. Thanks to 4bit quantization and small-sized reward model (3B), when we use 7B model for policy and STF models, we can fit all these 4 models on a single RTX 3090 with 24GB GPU RAM during inference and self-play.
 
-We can use the following script to launch the RLHF training session. Note in RL, we often need large amount (100k or more) of self-play episodes before we can observer significant performance gains.
+We can use the following script to launch the RLHF training session. Note in RL, we often need large amount of self-play episodes before we can observer significant performance gains.
 
 ```
 python3 instruct_llama/run_rlhf_lora.py

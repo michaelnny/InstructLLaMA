@@ -17,18 +17,18 @@ class config:
     # RM model is special because we need to maintain >=2 graphs when computing loss, which requires more GPU RAM
     max_seq_len: int = 512
 
-    rm_ckpt_file: str = './checkpoints/7b-sft/steps-1400-merged.pth'  # load fine-tuned checkpoint
+    rm_ckpt_file: str = './checkpoints/7b-sft/steps-2200-merged.pth'  # load fine-tuned checkpoint
     tokenizer_file: str = '/home/michael/models/meta_llama2/tokenizer.model'  # load tokenizer model
 
     random_head_weights: bool = True
 
     # datasets
     train_datasources: Tuple[str] = (
-        './datasets/stack_exchange_preferences/train.pkl',  # this demands more GPU RAM because we have more than 2 responses per each sample
+        # './datasets/stack_exchange_preferences/train.pkl',  # this demands more GPU RAM because we have more than 2 responses per sample
         './datasets/hh-rlhf/train.pkl',
     )
     val_datasources: Tuple[str] = (
-        './datasets/stack_exchange_preferences/validation.pkl',
+        # './datasets/stack_exchange_preferences/validation.pkl',
         './datasets/hh-rlhf/validation.pkl',
     )
     dataloader_workers: int = 1
@@ -42,18 +42,19 @@ class config:
     num_epochs: int = 5
     # we always use micro batch size of 1 (sample) during training and evaluation
     gradient_accum_steps: int = 128
-    val_interval: int = 200  # this also decides how often we create model checkpoints
+    loss_scale: float = 1.0 / 32  # scale loss to account for gradient accumulation, we don't want to use a very small scale
+    val_interval: int = 200
     val_steps: int = 200
     log_interval: int = 5  # log training metrics (loss, accuracy)
     ckpt_interval: int = 200  # save model checkpoints every N training iterations
 
-    # whether normalize reward before compute loss during training and validation
+    # normalize and clip reward before compute loss during training and validation
     normalize_reward: bool = True
     max_abs_reward: float = 0.0
 
     # LoRA configuration
     lora_r: int = 128
-    lora_scaling: float = 1.0  # we don't use alpha here, instead directly set the scaling
+    lora_scaling: float = 1.0  # set the LoRA scaling, by default 1.0 no scaling
     lora_dropout: float = 0.0
 
     # LoRA trainable layers
@@ -63,7 +64,7 @@ class config:
     lora_attn_proj: bool = True  # train Attention projection layer
     lora_attn_mlp: bool = True  # train Attention MLP block
 
-    train_bias: str = 'none'  # none, lora_only, all
+    train_bias: str = 'all'  # none, lora_only, all
     train_head: bool = True  # note we don't apply LoRA to model output head
 
     # Quantization
@@ -72,14 +73,14 @@ class config:
     quant_4bit_double: bool = True  # double quantize
     quant_4bit_type: str = 'nf4'  # only supports 'fp4' or 'nf4'
 
-    # learning rate scheduler
-    init_lr: float = 5e-5  # initial learning rate
-    max_lr: float = 5e-4  # max learning rate after warm up
-    min_lr: float = 3e-4  # min learning rate after decay
+    # learning rate, use smaller lr if also train head
+    init_lr: float = 8e-6  # initial learning rate
+    max_lr: float = 8e-5  # max learning rate after warm up
+    min_lr: float = 4e-5  # min learning rate after decay
     warmup_ratio: float = 0.03
 
     # AdamW optimizer
-    use_paged_adamw: bool = False  # need this if using 4bit quantization
+    use_paged_adamw: bool = False
     weight_decay: float = 0.0
     adam_betas: Tuple = (0.9, 0.95)
     adam_eps: float = 1e-5
@@ -91,8 +92,7 @@ class config:
     attn_dropout: float = 0.1
     resid_dropout: float = 0.1
 
-    gradient_checkpointing: bool = True
-
+    gradient_checkpointing: bool = False
     mixed_precision: bool = True  # default to BF16, but if no native GPU support detected, will use FP16.
     compile_model: bool = False  # not working with QLoRA
 
