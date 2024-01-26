@@ -45,7 +45,7 @@ class config:
     # accumulate gradients so for each iteration, the actual batch size is = train_batch_size x gradient_accum_steps
     train_batch_size: int = 2
     gradient_accum_steps: int = 64
-    loss_scale: float = 1.0 / 32  # scale loss to account for gradient accumulation, we don't want to use a very small scale
+    loss_scale: float = 1.0 / 16  # scale loss to account for gradient accumulation, we don't want to use a very small scale
     val_interval: int = 200
     val_batch_size: int = 30
     val_steps: int = 20
@@ -62,7 +62,7 @@ class config:
     lora_attn_key: bool = False  # train Attention key layer
     lora_attn_value: bool = True  # train Attention value layer
     lora_attn_proj: bool = False  # train Attention projection layer
-    lora_attn_mlp: bool = True  # train Attention MLP block
+    lora_attn_mlp: bool = False  # train Attention MLP block
 
     train_bias: str = 'all'  # none, lora_only, all
     train_head: bool = True  # note we don't apply LoRA to model output head
@@ -73,10 +73,10 @@ class config:
     quant_4bit_double: bool = True  # double quantize
     quant_4bit_type: str = 'nf4'  # only supports 'fp4' or 'nf4'
 
-    # learning rate, use smaller lr if also train head
-    init_lr: float = 6e-6  # initial learning rate
-    max_lr: float = 6e-5  # max learning rate after warm up
-    min_lr: float = 3e-5  # min learning rate after decay
+    # learning rate, maybe use smaller lr if also train head since we don't apply LoRA head layer
+    init_lr: float = 3e-5  # initial learning rate
+    max_lr: float = 3e-4  # max learning rate after warm up
+    min_lr: float = 3e-4  # min learning rate after decay
     warmup_ratio: float = 0.03
 
     # prompt is less important than completion

@@ -29,15 +29,15 @@ class LoraModelArgs(llama.ModelArgs):
     lora_scaling: float = 1.0
     lora_dropout: float = 0.0
 
-    lora_attn_query: bool = True  # train Attention query layer
+    lora_attn_query: bool = False  # train Attention query layer
     lora_attn_key: bool = False  # train Attention key layer
-    lora_attn_value: bool = True  # train Attention value layer
+    lora_attn_value: bool = False  # train Attention value layer
     lora_attn_proj: bool = False  # train Attention output projection layer
     lora_attn_mlp: bool = False  # train Attention MLP block
 
-    quant_4bit: bool = True  # quantize frozen linear layer
-    quant_lora_4bit: bool = True  # quantize LoRA linear layer
-    quant_4bit_double: bool = True
+    quant_4bit: bool = False  # quantize frozen linear layer
+    quant_lora_4bit: bool = False  # quantize LoRA linear layer
+    quant_4bit_double: bool = False
     quant_4bit_type: str = 'nf4'
     quant_compute_dtype: torch.dtype = torch.bfloat16
 
@@ -138,7 +138,6 @@ class Attention(llama.Attention):
 
         # regularization
         self.attn_dropout = nn.Dropout(args.attn_dropout) if args.attn_dropout > 0 else nn.Identity()
-        self.resid_dropout = nn.Dropout(args.resid_dropout) if args.resid_dropout > 0 else nn.Identity()
 
 
 class FeedForward(llama.FeedForward):
@@ -148,7 +147,6 @@ class FeedForward(llama.FeedForward):
         hidden_dim: int,
         multiple_of: int,
         ffn_dim_multiplier: Optional[float],
-        resid_dropout: Optional[float],
         args: LoraModelArgs,
     ):
         nn.Module.__init__(self)
@@ -163,8 +161,6 @@ class FeedForward(llama.FeedForward):
         self.w1 = layer_cls(dim, hidden_dim, bias=False)
         self.w2 = layer_cls(hidden_dim, dim, bias=False)
         self.w3 = layer_cls(dim, hidden_dim, bias=False)
-
-        self.resid_dropout = nn.Dropout(resid_dropout) if resid_dropout > 0 else nn.Identity()
 
 
 class TransformerBlock(llama.TransformerBlock):
@@ -181,11 +177,11 @@ class TransformerBlock(llama.TransformerBlock):
             hidden_dim=4 * args.dim,
             multiple_of=args.multiple_of,
             ffn_dim_multiplier=args.ffn_dim_multiplier,
-            resid_dropout=args.resid_dropout,
             args=args,
         )
         self.attention_norm = llama.RMSNorm(args.dim, eps=args.norm_eps)
         self.ffn_norm = llama.RMSNorm(args.dim, eps=args.norm_eps)
+        self.resid_dropout = nn.Dropout(args.resid_dropout) if args.resid_dropout > 0 else nn.Identity()
 
 
 class Transformer(llama.Transformer):

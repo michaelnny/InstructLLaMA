@@ -52,6 +52,9 @@ class Llama:
         if not os.path.exists(params_path):
             raise ValueError(f'Can not find model metadata file {params_path!r}, aborting ...')
 
+        print(f'Starting to load tokenizer checkpoint {tokenizer_path!r} ...')
+        tokenizer = Tokenizer(model_path=tokenizer_path)
+
         print(f'Starting to load model checkpoints {ckpt_path!r} ...')
 
         torch.manual_seed(seed)
@@ -63,15 +66,16 @@ class Llama:
         with open(params_path, 'r') as f:
             params = json.loads(f.read())
 
-        try:
-            del params['max_seq_len']
-            del params['max_batch_size']
-            del params['use_cache']
-        except Exception:
-            pass
+        # remove old keys
+        for k in ['max_seq_len', 'max_batch_size', 'use_cache', 'vocab_size']:
+            try:
+                del params[k]
+            except Exception:
+                continue
 
         model_args: ModelArgs = ModelArgs(
             **params,
+            vocab_size=tokenizer.vocab_size,
             max_seq_len=max_seq_len,
             max_batch_size=max_batch_size,
             use_cache=True,
@@ -81,10 +85,6 @@ class Llama:
         model.load_state_dict(checkpoint, strict=False)
 
         print(f'Model checkpoint loaded in {time.time() - t0:.2f} seconds')
-
-        print(f'Starting to load tokenizer checkpoint {tokenizer_path!r} ...')
-        tokenizer = Tokenizer(model_path=tokenizer_path)
-        model_args.vocab_size = tokenizer.vocab_size
 
         for params in model.parameters():
             params.requires_grad = False

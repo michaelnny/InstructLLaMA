@@ -42,7 +42,7 @@ class config:
     num_epochs: int = 5
     # we always use micro batch size of 1 (sample) during training and evaluation
     gradient_accum_steps: int = 128
-    loss_scale: float = 1.0 / 32  # scale loss to account for gradient accumulation, we don't want to use a very small scale
+    loss_scale: float = 1.0 / 16  # scale loss to account for gradient accumulation, we don't want to use a very small scale
     val_interval: int = 200
     val_steps: int = 200
     log_interval: int = 5  # log training metrics (loss, accuracy)
@@ -73,10 +73,10 @@ class config:
     quant_4bit_double: bool = True  # double quantize
     quant_4bit_type: str = 'nf4'  # only supports 'fp4' or 'nf4'
 
-    # learning rate, use smaller lr if also train head
-    init_lr: float = 8e-6  # initial learning rate
-    max_lr: float = 8e-5  # max learning rate after warm up
-    min_lr: float = 4e-5  # min learning rate after decay
+    # learning rate, maybe use smaller lr if also train head since we don't apply LoRA head layer
+    init_lr: float = 3e-5  # initial learning rate
+    max_lr: float = 3e-4  # max learning rate after warm up
+    min_lr: float = 3e-4  # min learning rate after decay
     warmup_ratio: float = 0.03
 
     # AdamW optimizer
