@@ -78,7 +78,6 @@ class config:
     # dropout regularization
     embed_dropout: float = 0.0
     attn_dropout: float = 0.0
-    resid_dropout: float = 0.0
 
     mixed_precision: bool = True  # default to BF16, but if no native GPU support detected, will use FP16.
     compile_model: bool = False  # Performance may be worser than eager mode

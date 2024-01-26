@@ -94,7 +94,6 @@ class config:
     # dropout regularization
     embed_dropout: float = 0.0
     attn_dropout: float = 0.1
-    resid_dropout: float = 0.1
 
     gradient_checkpointing: bool = False
     mixed_precision: bool = True  # default to BF16, but if no native GPU support detected, will use FP16.

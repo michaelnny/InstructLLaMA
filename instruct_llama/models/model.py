@@ -53,7 +53,6 @@ class ModelArgs:
     # dropout regularization
     embed_dropout: float = 0.0
     attn_dropout: float = 0.0
-    resid_dropout: float = 0.0
 
     # others
     gradient_checkpointing: bool = False
@@ -276,7 +275,6 @@ class TransformerBlock(nn.Module):
         self.layer_id = layer_id
         self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
         self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
-        self.resid_dropout = nn.Dropout(args.resid_dropout) if args.resid_dropout > 0 else nn.Identity()
 
     def forward(
         self,
@@ -287,7 +285,6 @@ class TransformerBlock(nn.Module):
     ):
         h = x + self.attention.forward(self.attention_norm(x), start_pos, freqs_cis, mask)
         out = h + self.feed_forward.forward(self.ffn_norm(h))
-        out = self.resid_dropout(out)
         return out
 
 
@@ -339,7 +336,7 @@ class Transformer(nn.Module):
             # mask = torch.full((1, 1, seqlen, seqlen), float('-inf'), device=tokens.device)
             # mask = torch.triu(mask, diagonal=start_pos + 1).type_as(h)
 
-            mask = torch.full((seqlen, seqlen), float("-inf"), device=tokens.device)
+            mask = torch.full((seqlen, seqlen), float('-inf'), device=tokens.device)
             mask = torch.triu(mask, diagonal=1)
 
             # When performing key-value caching, we compute the attention scores

@@ -358,7 +358,6 @@ def fsdp_main():
         max_seq_len=cfg.max_seq_len,
         embed_dropout=cfg.embed_dropout,
         attn_dropout=cfg.attn_dropout,
-        resid_dropout=cfg.resid_dropout,
     )
 
     assert model_args.head_type == 'lm_head'

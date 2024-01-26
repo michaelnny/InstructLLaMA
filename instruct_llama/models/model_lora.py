@@ -181,7 +181,6 @@ class TransformerBlock(llama.TransformerBlock):
         )
         self.attention_norm = llama.RMSNorm(args.dim, eps=args.norm_eps)
         self.ffn_norm = llama.RMSNorm(args.dim, eps=args.norm_eps)
-        self.resid_dropout = nn.Dropout(args.resid_dropout) if args.resid_dropout > 0 else nn.Identity()
 
 
 class Transformer(llama.Transformer):

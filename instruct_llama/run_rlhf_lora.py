@@ -94,7 +94,6 @@ def build_model(
         max_batch_size=cfg.selfplay_batch_size if is_policy and not not_trainable else 1,
         embed_dropout=0.0 if not_trainable else cfg.embed_dropout,
         attn_dropout=0.0 if not_trainable else cfg.attn_dropout,
-        resid_dropout=0.0 if not_trainable else cfg.resid_dropout,
         gradient_checkpointing=False if not_trainable else cfg.gradient_checkpointing,
     )
 
