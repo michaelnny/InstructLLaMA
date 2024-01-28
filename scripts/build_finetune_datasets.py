@@ -491,7 +491,7 @@ def process_squad_dataset(
                     if len(response) == 0:
                         continue
 
-                    # insiert context at the first user prompt
+                    # insert context at the first user prompt
                     if i == 0:
                         question += f'\n\n{context}'
 
@@ -661,7 +661,7 @@ def process_msc_dialog_dataset(
     if metadata is None:
         metadata = {}
 
-    # the dataset comes with splited .txt file, the content of these .txt files are json object
+    # the dataset comes with splitted .txt file, the content of these .txt files are json object
     train_files, val_files = [], []
 
     if os.path.exists(src_dir):

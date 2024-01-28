@@ -4,7 +4,7 @@
 
 
 """
-Module for build pretraining datasets.
+Module for build pre-training datasets.
 """
 
 from typing import Tuple, List, Mapping, Text

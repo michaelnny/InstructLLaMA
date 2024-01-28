@@ -106,7 +106,7 @@ def _sort_answers_by_score_desc(answers: Answers) -> Answers:
 
 def _deduplicate_answers_by_score(answers: Answers, shuffle: bool = True) -> Answers:
     if shuffle:
-        # add some randomness so we are not always using the first occurence of some score
+        # add some randomness so we are not always using the first occurrence of some score
         random.shuffle(answers)
 
     scores = [a['pm_score'] for a in answers]
@@ -114,9 +114,9 @@ def _deduplicate_answers_by_score(answers: Answers, shuffle: bool = True) -> Ans
     if len(answers) == len(set(scores)):
         return answers
 
-    _, unique_indeces = np.unique(scores, return_index=True)
+    _, unique_indices = np.unique(scores, return_index=True)
 
-    out = [answers[i] for i in unique_indeces]
+    out = [answers[i] for i in unique_indices]
 
     assert len(out) == len(set(scores))
 
@@ -178,7 +178,7 @@ def _process_single_stackexchange_file(
 
     For each row, we apply these:
         * Check if question has minimum number of words, if not skip it
-        * Check if question contains some key words which we should skip (like pictures, moviews etc)
+        * Check if question contains some key words which we should skip (like pictures, movies etc)
         * Filter answers by apply the following rules:
             - Remove (semi-randomly) answers with duplicate scores
             - (Optional) remove answers with zero score
@@ -270,8 +270,7 @@ def _process_single_hh_rlhf_jsonl_file(
         if len(chosen_dialog) == 0 or len(rejected_dialog) == 0:
             continue
 
-        # build prompt tokens, for RL, we don't need the completion tokens,
-        # as that's the job of the RL agent
+        # build tokens (prompt + completion)
         tokens_list = []
         for dialog in (chosen_dialog, rejected_dialog):
             dialog = DEFAULT_DIALOG + dialog
