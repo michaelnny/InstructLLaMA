@@ -27,7 +27,7 @@ This project use a custom QLoRA implementation with basic tools such as PyTorch 
 - `instruct_llama` directory contains main source code for the project.
   - `configs` directory contains all the training configurations like model type, data source, number of iterations, learning rate etc.
   - `utils` directory contains helper modules like custom datasets, logging, tokenization, LoRA module etc.
-  - `model.py` contains the LLaMA model class.
+  - `models` contains the LLaMA model class and LoRA layers.
   - `run_pretrain.py` run pre-training (supports FSDP and multiple GPUs).
   - `run_sft_lora.py` run supervised fine-tuning starting from Meta's pre-trained model, using LoRA parameter efficient fine-tuning method (only supports single GPU).
   - `run_rm_lora.py` train reward model starting from supervised fine-tuning model, using LoRA parameter efficient fine-tuning method (only supports single GPU).

@@ -22,9 +22,9 @@ class config:
 
     # model type definition, the details (number of layers, heads etc.) are defined in model.py
     policy_model_type: str = '7B'  # 7B, 13B, 70B
-    reward_model_type: str = '3B'  # 7B, 13B, 70B
+    reward_model_type: str = '3B'  # 3B, 7B, 13B, 70B
 
-    max_seq_len: int = 512  # use smaller sequence length to save GPU RAM
+    max_seq_len: int = 512
 
     sft_ckpt_file: str = './checkpoints/7b-sft/steps-2200-merged.pth'  # load fine-tuned checkpoint
     rm_ckpt_file: str = './checkpoints/3b-rm/steps-2200-merged.pth'  # load RM checkpoint

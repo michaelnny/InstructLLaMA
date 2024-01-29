@@ -54,6 +54,9 @@ def create_fsdp_full_checkpoint(model: Transformer, rank: int, full_path: str) -
     save_full_state_model_checkpoint(model, rank, full_path, True)
     logger.info(f'FSDP model full state checkpoint saved at {full_path!r}')
 
+    # save model configuration params
+    _save_model_meta(model, os.path.dirname(full_path))
+
 
 def create_normalizer_checkpoint(norm: RunningMeanStd, full_path: str) -> None:
     _check_file_path(full_path)

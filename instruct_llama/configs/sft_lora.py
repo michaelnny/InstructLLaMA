@@ -13,7 +13,7 @@ class config:
 
     # model type definition, the details (number of layers, heads etc.) are defined in model.py
     model_type: str = '7B'  # 7B, 13B, 70B
-    max_seq_len: int = 512  # use smaller sequence length to save GPU RAM
+    max_seq_len: int = 512
 
     pretrain_ckpt_file: str = '/home/michael/models/meta_llama2/llama-2-7b/consolidated.pth'  # load pretrained checkpoint
     tokenizer_file: str = '/home/michael/models/meta_llama2/tokenizer.model'  # load tokenizer model

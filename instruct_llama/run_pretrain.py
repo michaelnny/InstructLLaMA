@@ -141,12 +141,16 @@ def get_fsdp_mixed_precision_policy(compute_dtype) -> Tuple[ShardedGradScaler, M
 # ---------------------------------------- FSDP module ----------------------------------------
 
 
-def compute_pre_train_loss(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+def compute_pretrain_loss(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
     assert len(logits.shape) == 3  # [B, max_seq_len, vocab_size]
     assert len(targets.shape) == 2  # [B, max_seq_len]
     assert logits.shape[0] == targets.shape[0]
 
-    return F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+    B, T, *_ = logits.shape
+    losses = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), reduction='none')
+    losses = losses.view(B, T)  # [batch_size, seq_len]
+    losses = losses.mean(1)  # [batch_size]
+    return losses
 
 
 @torch.no_grad()
@@ -183,9 +187,8 @@ def train_step(
     )
 
     output = model(x)
-
-    loss = compute_pre_train_loss(output, y)
-
+    losses = compute_pretrain_loss(output, y)
+    loss = losses.mean()
     # scale the loss to account for gradient accumulation
     scaled_loss = loss * loss_scale
 
@@ -195,7 +198,7 @@ def train_step(
         scaled_loss.backward()
 
     num_acc, num_samples = compute_metrics(output.detach(), y.detach())
-    tracker.update(loss.detach(), num_acc, num_samples)
+    tracker.update(losses.detach(), num_acc, num_samples)
 
 
 def update_step(
@@ -235,7 +238,6 @@ def run_validation_steps(
     """Run M validation steps"""
 
     tracker.reset()
-
     inner_pbar = None
     if local_rank == 0:
         inner_pbar = tqdm.tqdm(range(steps), colour='green', desc='Validation steps')
@@ -247,10 +249,9 @@ def run_validation_steps(
         )
 
         output = model(x)
-
-        loss = compute_pre_train_loss(output, y)
+        losses = compute_pretrain_loss(output, y)
         num_acc, num_samples = compute_metrics(output.detach(), y.detach())
-        tracker.update(loss.detach(), num_acc, num_samples)
+        tracker.update(losses.detach(), num_acc, num_samples)
 
         if inner_pbar is not None:
             inner_pbar.update(1)
@@ -465,13 +466,12 @@ def fsdp_main():
                 if torch_profiler is not None:
                     torch_profiler.step()
 
+                train_stats = train_tracker.get_dict(reset=True)
                 # logging training statistics
                 if train_steps % cfg.log_interval == 0:
-                    train_stats = train_tracker.get_dict()
                     train_stats['learning_rate'] = optimizer.param_groups[0]['lr']
                     train_stats['grad_norm'] = grad_norm.item()
                     log_statistics(tb_writer, train_steps, train_stats, True)
-                    train_tracker.reset()
 
                 # regular checkpointing
                 if cfg.ckpt_interval > 0 and (train_steps % cfg.ckpt_interval == 0 or train_steps == max_train_steps):
@@ -483,18 +483,17 @@ def fsdp_main():
                 if cfg.val_steps > 0 and (
                     cfg.val_interval > 0 and train_steps % cfg.val_interval == 0 or train_steps == max_train_steps
                 ):
-                    val_tracker.reset()
                     model.eval()
                     run_validation_steps(model, val_loader, cfg.val_steps, local_rank, val_tracker)
                     model.train()
 
-                    val_stats = val_tracker.get_dict()
+                    val_stats = val_tracker.get_dict(reset=True)
                     log_statistics(tb_writer, train_steps, val_stats, False)
 
                     # save best model
                     if val_stats['accuracy'] > best_val_accuracy:
                         best_val_accuracy = val_stats['accuracy']
-                        logger.info(f'New best validation accuracy: {val_stats["accuracy"]:.2f}%')
+                        logger.info(f'New best validation accuracy: {val_stats["accuracy"]:.2f}')
                         create_fsdp_full_checkpoint(model, rank, os.path.join(cfg.ckpt_dir, f'{cfg.model_type}-best.pth'))
 
     # show some training stats.

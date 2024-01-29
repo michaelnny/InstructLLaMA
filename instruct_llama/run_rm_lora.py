@@ -72,7 +72,7 @@ def compute_rm_comparison_loss(rewards: torch.Tensor) -> torch.Tensor:
     """
     assert len(rewards.shape) == 1  # [num_completions]
 
-    losses = None
+    losses = []
     N = len(rewards)  # number of completions
     C = math.comb(N, 2)  # number of combinations
 
@@ -90,21 +90,16 @@ def compute_rm_comparison_loss(rewards: torch.Tensor) -> torch.Tensor:
         assert r_preferred.shape == r_rejected.shape
 
         loss = -torch.nn.functional.logsigmoid(r_preferred - r_rejected).sum()
-        if losses is None:
-            losses = loss
-        else:
-            losses += loss
+        losses.append(loss)
 
-    assert losses is not None
-
+    losses = torch.stack(losses, dim=0)
     # average over number of combinations
-    loss = losses / C
-
-    return loss
+    losses = losses / C
+    return losses
 
 
 @torch.no_grad()
-def compute_metrics(rewards: torch.Tensor) -> Tuple[int, int, float, float]:
+def compute_metrics(rewards: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """Compute number of accurate predictions in terms of reward values.
 
     Note we assume the rewards are for the ordered completions for a given prompt,
@@ -116,21 +111,20 @@ def compute_metrics(rewards: torch.Tensor) -> Tuple[int, int, float, float]:
     C = math.comb(N, 2)  # number of combinations
 
     assert N >= 2
-    assert C >= 1
 
-    num_accurate = 0
+    chosen_rewards = []
+    rejected_rewards = []
 
     # for each better completion, compare to the remaining of worse completions
     for i in range(0, N - 1):
         r_rejected = rewards[i + 1 :]
-        r_preferred = rewards[i].repeat(len(r_rejected))
+        rejected_rewards.append(r_rejected.clone())
+        chosen_rewards.append(rewards[i].repeat(len(r_rejected)).clone())
 
-        # Perform element-wise comparison
-        num_accurate += (r_preferred > r_rejected).sum().item()
-
-    r_best = rewards[0].item()
-    r_worst = rewards[-1].item()
-    return num_accurate, C, r_best, r_worst
+    chosen_rewards = torch.stack(chosen_rewards, dim=0).flatten()
+    rejected_rewards = torch.stack(rejected_rewards, dim=0).flatten()
+    assert len(chosen_rewards) == len(rejected_rewards) == C
+    return chosen_rewards, rejected_rewards
 
 
 def train_step(
@@ -161,8 +155,8 @@ def train_step(
     if max_abs_reward > 0:
         rewards = rewards.clamp(min=-max_abs_reward, max=max_abs_reward)
     # compute loss in a single go
-    loss = compute_rm_comparison_loss(rewards)
-
+    losses = compute_rm_comparison_loss(rewards)
+    loss = losses.mean()
     # scale the loss to account for gradient accumulation
     scaled_loss = loss * loss_scale
 
@@ -171,8 +165,8 @@ def train_step(
     else:
         scaled_loss.backward()
 
-    num_acc, num_samples, r_best, r_worst = compute_metrics(rewards.detach())
-    tracker.update(loss.detach(), num_acc, num_samples, r_best, r_worst)
+    chosen_rewards, rejected_rewards = compute_metrics(rewards.detach())
+    tracker.update(losses.detach(), chosen_rewards, rejected_rewards)
 
     # always update reward norm stats
     reward_stats.update(raw_rewards)
@@ -235,9 +229,9 @@ def run_validation_steps(
             rewards = rewards.clamp(min=-max_abs_reward, max=max_abs_reward)
 
         # compute loss in a single go
-        loss = compute_rm_comparison_loss(rewards)
-        num_acc, num_samples, r_best, r_worst = compute_metrics(rewards.detach())
-        tracker.update(loss.detach(), num_acc, num_samples, r_best, r_worst)
+        losses = compute_rm_comparison_loss(rewards)
+        chosen_rewards, rejected_rewards = compute_metrics(rewards.detach())
+        tracker.update(losses.detach(), chosen_rewards, rejected_rewards)
 
         # # maybe don't update reward norm stats in evaluation mode
         # reward_stats.update(raw_rewards)
@@ -498,13 +492,12 @@ def main():
                 if torch_profiler is not None:
                     torch_profiler.step()
 
+                train_stats = train_tracker.get_dict(reset=True)
                 # logging training statistics
                 if train_steps % cfg.log_interval == 0:
-                    train_stats = train_tracker.get_dict()
                     train_stats['learning_rate'] = optimizer.param_groups[0]['lr']
                     train_stats['grad_norm'] = grad_norm.item()
                     log_statistics(tb_writer, train_steps, train_stats, True)
-                    train_tracker.reset()
 
                 # regular checkpointing
                 if cfg.ckpt_interval > 0 and (train_steps % cfg.ckpt_interval == 0 or train_steps == max_train_steps):
@@ -514,7 +507,6 @@ def main():
                 if cfg.val_steps > 0 and (
                     cfg.val_interval > 0 and train_steps % cfg.val_interval == 0 or train_steps == max_train_steps
                 ):
-                    val_tracker.reset()
                     model.eval()
                     run_validation_steps(
                         model,
@@ -527,12 +519,12 @@ def main():
                     )
                     model.train()
 
-                    val_stats = val_tracker.get_dict()
+                    val_stats = val_tracker.get_dict(reset=True)
                     log_statistics(tb_writer, train_steps, val_stats, False)
 
                     if val_stats['accuracy'] > best_val_accuracy:
                         best_val_accuracy = val_stats['accuracy']
-                        logger.info(f'New best validation accuracy: {val_stats["accuracy"]:.2f}%')
+                        logger.info(f'New best validation accuracy: {val_stats["accuracy"]:.2f}')
                         logger.info(f'Reward mean: {reward_stats.mean.item()}, reward variance: {reward_stats.var.item()}')
                         # save best model
                         create_checkpoint(model, reward_stats, train_steps, True)

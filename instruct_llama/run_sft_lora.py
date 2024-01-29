@@ -55,23 +55,17 @@ def compute_finetune_loss(logits: torch.Tensor, targets: torch.Tensor, mask: tor
     assert logits.shape[0] == targets.shape[0] == mask.shape[0]
 
     B, T, *_ = logits.shape
-
-    loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), reduction='none')
-
-    assert not torch.any(torch.isnan(loss))
-
-    loss = loss.view(B, T)
-
-    assert loss.shape == mask.shape
+    losses = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), reduction='none')
+    assert not torch.any(torch.isnan(losses))
+    losses = losses.view(B, T)
+    assert losses.shape == mask.shape
 
     # loss mask is defined as: -1s are prompt tokens, 1s are completion tokens, and 0s the padding tokens
     # note here prompt is less important than completion
     weights = mask.float().masked_fill(mask == -1, cfg.prompt_loss_weight).masked_fill(mask == 1, cfg.completion_loss_weight)
-    loss *= weights
-
-    loss = torch.mean(loss)
-
-    return loss
+    losses *= weights  # [batch_size, seq_len]
+    losses = losses.mean(1)  # [batch_size]
+    return losses
 
 
 @torch.no_grad()
@@ -118,8 +112,8 @@ def train_step(
 
     output = model(x)
 
-    loss = compute_finetune_loss(output, y, loss_mask)
-
+    losses = compute_finetune_loss(output, y, loss_mask)  # [batch_size]
+    loss = losses.mean()
     # scale the loss to account for gradient accumulation
     scaled_loss = loss * loss_scale
 
@@ -129,7 +123,7 @@ def train_step(
         scaled_loss.backward()
 
     num_acc, num_samples = compute_metrics(output.detach(), y.detach(), loss_mask.detach())
-    tracker.update(loss.detach(), num_acc, num_samples)
+    tracker.update(losses.detach(), num_acc, num_samples)
 
 
 def update_step(
@@ -176,10 +170,9 @@ def run_validation_steps(
         )
 
         output = model(x)
-
-        loss = compute_finetune_loss(output, y, loss_mask)
+        losses = compute_finetune_loss(output, y, loss_mask)  # [batch_size]
         num_acc, num_samples = compute_metrics(output.detach(), y.detach(), loss_mask.detach())
-        tracker.update(loss.detach(), num_acc, num_samples)
+        tracker.update(losses.detach(), num_acc, num_samples)
 
         if inner_pbar is not None:
             inner_pbar.update(1)
@@ -428,13 +421,12 @@ def main():
                 if torch_profiler is not None:
                     torch_profiler.step()
 
+                train_stats = train_tracker.get_dict(reset=True)
                 # logging training statistics
                 if train_steps % cfg.log_interval == 0:
-                    train_stats = train_tracker.get_dict()
                     train_stats['learning_rate'] = optimizer.param_groups[0]['lr']
                     train_stats['grad_norm'] = grad_norm.item()
                     log_statistics(tb_writer, train_steps, train_stats, True)
-                    train_tracker.reset()
 
                 # regular checkpointing
                 if cfg.ckpt_interval > 0 and (train_steps % cfg.ckpt_interval == 0 or train_steps == max_train_steps):
@@ -446,12 +438,11 @@ def main():
                 if cfg.val_steps > 0 and (
                     cfg.val_interval > 0 and train_steps % cfg.val_interval == 0 or train_steps == max_train_steps
                 ):
-                    val_tracker.reset()
                     model.eval()
                     run_validation_steps(model, val_loader, cfg.val_steps, val_tracker)
                     model.train()
 
-                    val_stats = val_tracker.get_dict()
+                    val_stats = val_tracker.get_dict(reset=True)
                     log_statistics(tb_writer, train_steps, val_stats, False)
 
                     # save best model
