@@ -67,7 +67,7 @@ class Llama:
             params = json.loads(f.read())
 
         # remove old keys
-        for k in ['max_seq_len', 'max_batch_size', 'use_cache', 'vocab_size']:
+        for k in ['max_seq_len', 'max_batch_size', 'use_cache', 'vocab_size', 'head_type']:
             try:
                 del params[k]
             except Exception:
@@ -78,6 +78,7 @@ class Llama:
             vocab_size=tokenizer.vocab_size,
             max_seq_len=max_seq_len,
             max_batch_size=max_batch_size,
+            head_type='lm_head',
             use_cache=True,
         )
 

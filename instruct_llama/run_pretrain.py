@@ -232,15 +232,16 @@ def run_validation_steps(
     model: Transformer,
     loader: DataLoader,
     steps: int,
+    rank: int,
     local_rank: int,
     tracker: StatsTracker,
 ) -> Mapping[Text, Any]:
     """Run M validation steps"""
 
     tracker.reset()
-    inner_pbar = None
-    if local_rank == 0:
-        inner_pbar = tqdm.tqdm(range(steps), colour='green', desc='Validation steps')
+    val_pbar = None
+    if rank == 0:
+        val_pbar = tqdm.tqdm(range(steps), colour='green', desc='Validation steps')
 
     for i, (x, y) in enumerate(loader):
         x, y = (
@@ -253,14 +254,14 @@ def run_validation_steps(
         num_acc, num_samples = compute_metrics(output.detach(), y.detach())
         tracker.update(losses.detach(), num_acc, num_samples)
 
-        if inner_pbar is not None:
-            inner_pbar.update(1)
+        if val_pbar is not None:
+            val_pbar.update(1)
 
         if i >= steps:
             break
 
-    if inner_pbar is not None:
-        inner_pbar.close()
+    if val_pbar is not None:
+        val_pbar.close()
 
 
 def init_weights(model: Transformer) -> None:
@@ -390,11 +391,6 @@ def fsdp_main():
         logger.info('applying FSDP activation checkpointing ...')
         apply_fsdp_activation_checkpointing(model)
 
-    # seems not so helpful in terms of speed improvement
-    if cfg.compile_model:
-        logger.info('compile model using torch.compile() ...')
-        model = torch.compile(model)
-
     logger.info('Initializing optimizer ...')
 
     num_trainable, num_frozen = compute_num_trainable_params(model)
@@ -424,7 +420,7 @@ def fsdp_main():
 
     torch_profiler = None
     tb_writer = None
-    inner_pbar = None
+    train_pbar = None
     best_val_accuracy = 0.0
     train_steps = 0
 
@@ -432,17 +428,15 @@ def fsdp_main():
         os.makedirs(cfg.log_dir, exist_ok=True)
         os.makedirs(cfg.ckpt_dir, exist_ok=True)
 
-        if cfg.use_tensorboard:
-            tb_writer = SummaryWriter(os.path.join(cfg.log_dir, cfg.model_type))
+        train_pbar = tqdm.tqdm(range(max_train_steps), colour='blue', desc='Training steps')
+        tb_writer = SummaryWriter(os.path.join(cfg.log_dir, cfg.model_type))
 
         # Careful as the logs will grow very fast
         if cfg.use_profiler:
             torch_profiler = create_trace_profiler(os.path.join(cfg.log_dir, 'profile_traces'))
 
-        inner_pbar = tqdm.tqdm(range(max_train_steps), colour='blue', desc='Training iterations')
-
-    train_tracker = StatsTracker(True, rank=local_rank)
-    val_tracker = StatsTracker(True, rank=local_rank)
+    train_tracker = StatsTracker(local_rank=local_rank, world_size=world_size)
+    val_tracker = StatsTracker(local_rank=local_rank, world_size=world_size)
 
     logger.info(
         f'Starting to run {cfg.num_epochs} training epochs, total of {max_train_steps} steps, with batch size {batch_size}'
@@ -460,7 +454,7 @@ def fsdp_main():
             if iter % cfg.gradient_accum_steps == 0:
                 grad_norm = get_grad_norm_fsdp(model, rank, world_size, cfg.sharding_strategy)
                 update_step(model, optimizer, scheduler, cfg.grad_clip, scaler)
-                inner_pbar.update(1)
+                train_pbar.update(1)
                 train_steps += 1
 
                 if torch_profiler is not None:
@@ -484,7 +478,7 @@ def fsdp_main():
                     cfg.val_interval > 0 and train_steps % cfg.val_interval == 0 or train_steps == max_train_steps
                 ):
                     model.eval()
-                    run_validation_steps(model, val_loader, cfg.val_steps, local_rank, val_tracker)
+                    run_validation_steps(model, val_loader, cfg.val_steps, rank, local_rank, val_tracker)
                     model.train()
 
                     val_stats = val_tracker.get_dict(reset=True)

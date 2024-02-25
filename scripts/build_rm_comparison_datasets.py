@@ -6,7 +6,8 @@
 """Module to build reward model (RM) comparison dataset"""
 from typing import Tuple, List, Mapping, Text, Any
 import functools
-from concurrent.futures import ProcessPoolExecutor, as_completed
+import tqdm
+import multiprocessing as mp
 import os
 import shutil
 import json
@@ -346,16 +347,14 @@ def process_hh_rlhf_dataset(
         tokenizer=tokenizer,
     )
 
+    with mp.Pool(num_workers) as pool:
+        result_list = list(
+            tqdm.tqdm(pool.imap(process_file_func, working_files), total=len(working_files), desc='Processing files')
+        )
+
     datasets = []
-
-    # Create a ProcessPoolExecutor with maximum N processes
-    with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        futures = [executor.submit(process_file_func, file) for file in working_files]
-
-        for future in as_completed(futures):
-            samples = future.result()
-
-            datasets.extend(samples)
+    for result in result_list:
+        datasets.extend(result)
 
     metadata['vocab_size'] = tokenizer.vocab_size
     metadata['data_structure'] = (
@@ -381,8 +380,8 @@ def process_stackexchange_dataset(
     output_dir: str,
     tokenizer: Tokenizer,
     min_question_words: int = 8,
-    min_responses: int = 4,
-    max_responses: int = 6,
+    min_responses: int = 2,
+    max_responses: int = 8,  # maximum responses per sample
     remove_zero_score: bool = False,
     num_workers=8,
     validation_ratio: float = 0.05,
@@ -442,16 +441,14 @@ def process_stackexchange_dataset(
         tokenizer=tokenizer,
     )
 
+    with mp.Pool(num_workers) as pool:
+        result_list = list(
+            tqdm.tqdm(pool.imap(process_file_func, working_files), total=len(working_files), desc='Processing files')
+        )
+
     datasets = []
-
-    # Create a ProcessPoolExecutor with maximum N processes
-    with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        futures = [executor.submit(process_file_func, file) for file in working_files]
-
-        for future in as_completed(futures):
-            samples = future.result()
-
-            datasets.extend(samples)
+    for result in result_list:
+        datasets.extend(result)
 
     metadata['vocab_size'] = tokenizer.vocab_size
     metadata['data_structure'] = (
@@ -478,18 +475,22 @@ if __name__ == '__main__':
     np.random.seed(seed)
     random.seed(seed)
 
+    # Set multiprocessing start mode
+    mp.set_start_method('spawn')
+
     tokenizer = Tokenizer(model_path='/home/michael/models/meta_llama2/tokenizer.model')
 
     process_hh_rlhf_dataset(
         src_dir='/home/michael/datasets/hh-rlhf',
-        output_dir='./datasets/hh-rlhf',
+        output_dir='./datasets/hh_rlhf_comparison',
         tokenizer=tokenizer,
-        num_workers=8,
+        num_workers=16,
     )
 
     process_stackexchange_dataset(
         src_dir='/home/michael/datasets/stack_exchange_preferences',
-        output_dir='./datasets/stack_exchange_preferences',
+        output_dir='./datasets/stack_exchange_comparison',
         tokenizer=tokenizer,
-        num_workers=8,
+        num_workers=16,
+        max_responses=4,
     )

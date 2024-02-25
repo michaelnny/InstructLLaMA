@@ -6,13 +6,16 @@
 """Module to build prompt only dataset for RL"""
 from typing import Tuple, List, Mapping, Text, Any
 import functools
-from concurrent.futures import ProcessPoolExecutor, as_completed
+import tqdm
+import multiprocessing as mp
 import os
 import shutil
 import json
 import random
 import pickle
 import torch
+import pyarrow.parquet as pq
+
 
 # support running without installing as a package
 from pathlib import Path
@@ -105,44 +108,6 @@ def _convert_to_llama_chat_format(raw_text) -> Dialog:
     return dialog
 
 
-def _process_single_red_team_jsonl_file(
-    file_path: str,
-    tokenizer: Tokenizer,
-    max_seq_len: int,
-) -> List[Tuple[int]]:
-    """
-    Red teaming data has different structures than other files.
-    Read one single .jsonl file and go over each row to build the dataset samples,
-    where we only need the prompt tokens for RL.
-    """
-
-    # needs to tread it as if it is .json
-    with open(file_path, 'r', encoding='utf-8') as file:
-        rows = json.loads(file.read())
-
-    samples = []
-
-    for row in rows:
-        dialog = _convert_to_llama_chat_format(row['transcript'])
-
-        if len(dialog) == 0:
-            continue
-
-        # build prompt tokens, for RL, we don't need the completion tokens,
-        # as that's the job of the RL agent
-        dialog = DEFAULT_DIALOG + dialog
-        prompt_tokens, _ = build_prompt_completion(dialog, tokenizer)
-
-        assert prompt_tokens is not None
-
-        if len(prompt_tokens) > max_seq_len:
-            continue
-
-        samples.append({'prompt_tokens': prompt_tokens})
-
-    return samples
-
-
 def _process_single_jsonl_file(
     file_path: str,
     tokenizer: Tokenizer,
@@ -176,7 +141,35 @@ def _process_single_jsonl_file(
     return samples
 
 
-# ----------------------------------- high quality datasets -----------------------------------
+def _process_single_stackexchange_file(
+    file_path: str,
+    tokenizer: Tokenizer,
+    max_seq_len: int,
+) -> List[Tuple[int]]:
+    """
+    Read one single .parquet file and go over each row to build the dataset samples.
+    """
+    df = pq.read_table(file_path).to_pandas()
+
+    samples = []
+
+    for index, row in df.iterrows():
+        question = row['question']
+
+        # build prompt tokens once
+        dialog = DEFAULT_DIALOG + [
+            {'role': 'user', 'content': question},
+        ]
+        prompt_tokens, _ = build_prompt_completion(dialog, tokenizer)
+
+        assert prompt_tokens is not None
+
+        if len(prompt_tokens) > max_seq_len:
+            continue
+
+        samples.append({'prompt_tokens': prompt_tokens})
+
+    return samples
 
 
 def process_hh_rlhf_dataset(
@@ -236,23 +229,104 @@ def process_hh_rlhf_dataset(
         tokenizer=tokenizer,
     )
 
+    with mp.Pool(num_workers) as pool:
+        result_list = list(
+            tqdm.tqdm(pool.imap(process_file_func, working_files), total=len(working_files), desc='Processing files')
+        )
+
     datasets = []
-
-    # Create a ProcessPoolExecutor with maximum N processes
-    with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        futures = [executor.submit(process_file_func, file) for file in working_files]
-
-        for future in as_completed(futures):
-            samples = future.result()
-
-            datasets.extend(samples)
+    for result in result_list:
+        datasets.extend(result)
 
     metadata['vocab_size'] = tokenizer.vocab_size
-    metadata[
-        'data_structure'
-    ] = 'A list of dictionary object with a single key "prompt_tokens", which contains the tokenized user prompt'
+    metadata['data_structure'] = (
+        'A list of dictionary object with a single key "prompt_tokens", which contains the tokenized user prompt'
+    )
 
     logger.info('Saving processed Human preference dataset ...')
+    _split_and_save_datasets(
+        datasets,
+        validation_ratio,
+        train_output_file,
+        val_output_file,
+        meta_output_file,
+        metadata,
+    )
+
+
+def process_stackexchange_dataset(
+    src_dir: str,
+    output_dir: str,
+    tokenizer: Tokenizer,
+    num_workers=8,
+    validation_ratio: float = 0.05,
+    max_seq_length: int = 2048,  # prompt + completion lengths greater than this are discarded
+    overwrite_output: bool = False,
+    metadata: Metadata = {
+        'name': 'Stack exchange preferences',
+        'language': 'English',
+        'home_page': 'https://huggingface.co/datasets/HuggingFaceH4/stack-exchange-preferences',
+    },
+) -> None:
+    """Process Stack exchange preferences dataset and save the tokenized prompt to .pkl format."""
+
+    assert os.path.exists(src_dir) and os.path.isdir(src_dir)
+    assert 0 <= validation_ratio <= 0.2
+
+    train_output_file = os.path.join(output_dir, 'train.pkl')
+    val_output_file = os.path.join(output_dir, 'validation.pkl')
+    meta_output_file = os.path.join(output_dir, 'meta.json')
+
+    if any(os.path.exists(f) for f in (train_output_file, val_output_file, meta_output_file)) and not overwrite_output:
+        logger.error(
+            f'The output files "{train_output_file}", "{val_output_file}", "{meta_output_file}" already exists, aborting ...'
+        )
+        return
+
+    # Create the output directory if necessary
+    if os.path.exists(output_dir) and overwrite_output:
+        logger.info(f'Cleanup output folder {output_dir!r}')
+        shutil.rmtree(output_dir)
+
+    os.makedirs(output_dir, mode=0o777, exist_ok=True)
+
+    if metadata is None:
+        metadata = {}
+
+    working_files = find_certain_files_under_dir(src_dir, '.parquet')
+
+    num_files = len(working_files)
+
+    if num_files == 0:
+        logger.warning('Found no .parquet file')
+        return
+
+    if num_files < num_workers:
+        num_workers = num_files
+
+    logger.info(f'Processing {num_files} .parquet files using {num_workers} workers ...')
+
+    process_file_func = functools.partial(
+        _process_single_stackexchange_file,
+        max_seq_len=max_seq_length,
+        tokenizer=tokenizer,
+    )
+
+    with mp.Pool(num_workers) as pool:
+        result_list = list(
+            tqdm.tqdm(pool.imap(process_file_func, working_files), total=len(working_files), desc='Processing files')
+        )
+
+    datasets = []
+    for result in result_list:
+        datasets.extend(result)
+
+    metadata['vocab_size'] = tokenizer.vocab_size
+    metadata['data_structure'] = (
+        'A list of dictionary object with a single key "prompt_tokens", which contains the tokenized user prompt'
+    )
+
+    logger.info('Saving processed stack exchange preferences dataset ...')
     _split_and_save_datasets(
         datasets,
         validation_ratio,
@@ -268,11 +342,21 @@ if __name__ == '__main__':
     torch.manual_seed(seed)
     random.seed(seed)
 
+    # Set multiprocessing start mode
+    mp.set_start_method('spawn')
+
     tokenizer = Tokenizer(model_path='/home/michael/models/meta_llama2/tokenizer.model')
 
     process_hh_rlhf_dataset(
         src_dir='/home/michael/datasets/hh-rlhf',
-        output_dir='./datasets/hh-rlhf_prompt_only',
+        output_dir='./datasets/hh_rlhf_prompt_only',
         tokenizer=tokenizer,
-        num_workers=8,
+        num_workers=16,
+    )
+
+    process_stackexchange_dataset(
+        src_dir='/home/michael/datasets/stack_exchange_preferences',
+        output_dir='./datasets/stack_exchange_prompt_only',
+        tokenizer=tokenizer,
+        num_workers=16,
     )

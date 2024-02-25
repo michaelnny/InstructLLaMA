@@ -12,29 +12,38 @@ import torch.distributed as dist
 class BaseTracker:
     def __init__(
         self,
-        distributed: bool = False,
-        rank: int = 0,
+        local_rank: int = 0,
+        world_size: int = 0,
     ):
-        assert rank >= 0
-        self.distributed = distributed
-        self.rank = rank
+        assert local_rank >= 0
+        assert world_size >= 0
+        self.world_size = world_size
+        self.local_rank = local_rank
+
+        self.distributed = self.world_size > 1
+        self.device = f'cuda:{self.local_rank}' if self.distributed else 'cpu'
         self.reset()
 
-    def reset(self) -> None:
+    def reset(self) -> None:  # noqa: E704
         ...
 
-    def update(self, **args) -> None:
+    def update(self, **args) -> None:  # noqa: E704
         ...
 
     def get_dict(self, reset: bool) -> Dict:
         return {}
 
     def to_tensor(self, data) -> torch.Tensor:
-        return torch.tensor(data).to(f'cuda:{self.rank}' if self.distributed else 'cpu')
+        return torch.tensor(data).to(self.device)
 
-    def reduce_tensor(self, data) -> None:
+    def gather_tensor(self, data: torch.Tensor) -> torch.Tensor:
         if self.distributed:
-            dist.all_reduce(data, op=dist.ReduceOp.SUM)
+            all_values = [torch.empty_like(data).to(self.local_rank) for _ in range(self.world_size)]
+            dist.all_gather(all_values, data)
+            cat_function = torch.cat if data.dim() > 0 else torch.stack
+            return cat_function(all_values, dim=0)
+        else:
+            return data
 
 
 class StatsTracker(BaseTracker):
@@ -59,16 +68,16 @@ class StatsTracker(BaseTracker):
         num_accurate = self.to_tensor(self.num_accurate)
         num_samples = self.to_tensor(self.num_samples)
 
-        self.reduce_tensor(losses)
-        self.reduce_tensor(num_accurate)
-        self.reduce_tensor(num_samples)
+        losses = self.gather_tensor(losses)
+        num_accurate = self.gather_tensor(num_accurate)
+        num_samples = self.gather_tensor(num_samples)
 
         if reset:
             self.reset()
 
         return {
             'loss': losses.mean().item(),
-            'accuracy': (num_accurate / num_samples).item(),
+            'accuracy': (num_accurate.sum() / num_samples.sum()).item(),
             'perplexity': torch.exp(losses).mean().item(),
         }
 
@@ -104,19 +113,21 @@ class RMStatsTracker(BaseTracker):
         num_accurate = self.to_tensor(self.num_accurate)
         num_samples = self.to_tensor(self.num_samples)
 
-        self.reduce_tensor(losses)
-        self.reduce_tensor(chosen_rewards)
-        self.reduce_tensor(rejected_rewards)
-        self.reduce_tensor(num_accurate)
-        self.reduce_tensor(num_samples)
+        losses = self.gather_tensor(losses)
+        chosen_rewards = self.gather_tensor(chosen_rewards)
+        rejected_rewards = self.gather_tensor(rejected_rewards)
+        num_accurate = self.gather_tensor(num_accurate)
+        num_samples = self.gather_tensor(num_samples)
 
         if reset:
             self.reset()
 
         return {
             'loss': losses.mean().item(),
-            'accuracy': (num_accurate / num_samples).item(),
-            'chosen_reward': chosen_rewards.mean().item(),
-            'rejected_reward': rejected_rewards.mean().item(),
+            'accuracy': (num_accurate.sum() / num_samples.sum()).item(),
+            'chosen_reward_mean': chosen_rewards.mean().item(),
+            'chosen_reward_std': chosen_rewards.std().item(),
+            'rejected_reward_mean': rejected_rewards.mean().item(),
+            'rejected_reward_std': rejected_rewards.std().item(),
             'reward_gap': (chosen_rewards.mean() - rejected_rewards.mean()).item(),
         }

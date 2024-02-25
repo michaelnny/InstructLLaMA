@@ -24,12 +24,12 @@ class config:
 
     # datasets
     train_datasources: Tuple[str] = (
-        # './datasets/stack_exchange_preferences/train.pkl',  # this demands more GPU RAM because we have more than 2 responses per sample
-        './datasets/hh-rlhf/train.pkl',
+        './datasets/stack_exchange_comparison/train.pkl',  # this demands more GPU RAM because we have more than 2 responses per sample
+        './datasets/hh_rlhf_comparison/train.pkl',
     )
     val_datasources: Tuple[str] = (
-        # './datasets/stack_exchange_preferences/validation.pkl',
-        './datasets/hh-rlhf/validation.pkl',
+        './datasets/stack_exchange_comparison/validation.pkl',
+        './datasets/hh_rlhf_comparison/validation.pkl',
     )
     dataloader_workers: int = 1
 
@@ -39,18 +39,20 @@ class config:
     full_pad: bool = False
 
     # training and validation loops
-    num_epochs: int = 5
-    # we always use micro batch size of 1 (sample) during training and evaluation
-    gradient_accum_steps: int = 128
-    loss_scale: float = 1.0 / 16  # scale loss to account for gradient accumulation, we don't want to use a very small scale
-    val_interval: int = 200
-    val_steps: int = 200
+    num_epochs: int = 1
+    # this is number of sample, the actual batch for forward pass might be larger since one sample could have >=2 responses
+    train_batch_size: int = 2
+    gradient_accum_steps: int = 32
+    loss_scale: float = 1.0 / 8  # scale loss to account for gradient accumulation, we don't want to use a very small scale
+    val_interval: int = 400
+    val_steps: int = 60
+    val_batch_size: int = 25
     log_interval: int = 5  # log training metrics (loss, accuracy)
-    ckpt_interval: int = 200  # save model checkpoints every N training iterations
+    ckpt_interval: int = 400  # save model checkpoints every N Training steps
 
-    # normalize and clip reward before compute loss during training and validation
-    normalize_reward: bool = True
-    max_abs_reward: float = 0.0
+    # number of samples to collect statistics for reward normalizer after training is done
+    norm_samples: int = 5000
+    norm_batch_size: int = 25
 
     # LoRA configuration
     lora_r: int = 128
@@ -59,45 +61,43 @@ class config:
 
     # LoRA trainable layers
     lora_attn_query: bool = True  # train Attention query layer
-    lora_attn_key: bool = True  # train Attention key layer
+    lora_attn_key: bool = False  # train Attention key layer
     lora_attn_value: bool = True  # train Attention value layer
-    lora_attn_proj: bool = True  # train Attention projection layer
-    lora_attn_mlp: bool = True  # train Attention MLP block
+    lora_attn_proj: bool = False  # train Attention projection layer
+    lora_attn_mlp: bool = False  # train Attention MLP block
 
     train_bias: str = 'all'  # none, lora_only, all
     train_head: bool = True  # note we don't apply LoRA to model output head
 
     # Quantization
-    quant_4bit: bool = False  # quantize frozen linear layer
+    quant_4bit: bool = True  # quantize frozen linear layer
     quant_lora_4bit: bool = False  # quantize LoRA linear layer
     quant_4bit_double: bool = True  # double quantize
     quant_4bit_type: str = 'nf4'  # only supports 'fp4' or 'nf4'
 
     # learning rate, maybe use smaller lr if also train head since we don't apply LoRA head layer
-    init_lr: float = 3e-5  # initial learning rate
-    max_lr: float = 3e-4  # max learning rate after warm up
-    min_lr: float = 3e-4  # min learning rate after decay
-    warmup_ratio: float = 0.03
+    init_lr: float = 6e-6  # initial learning rate
+    max_lr: float = 6e-5  # max learning rate after warm up
+    min_lr: float = 6e-5  # min learning rate after decay
+    warmup_ratio: float = 0.02
 
     # AdamW optimizer
     use_paged_adamw: bool = False
     weight_decay: float = 0.0
     adam_betas: Tuple = (0.9, 0.95)
     adam_eps: float = 1e-5
-    adam_fused: bool = False  # only applicable if not using bitsandbytes optimizer
-    grad_clip: float = 0.0
+    adam_fused: bool = True  # only applicable if not using bitsandbytes optimizer
+    grad_clip: float = 10.0
 
     # dropout regularization
     embed_dropout: float = 0.0
-    attn_dropout: float = 0.1
+    attn_dropout: float = 0.0
 
     gradient_checkpointing: bool = False
     mixed_precision: bool = True  # default to BF16, but if no native GPU support detected, will use FP16.
-    compile_model: bool = False  # not working with QLoRA
 
     # others
     seed: int = 143
     log_dir: str = './logs/rm_lora'  # save logs and traces
     ckpt_dir: str = './checkpoints/rm_lora'
-    use_tensorboard: bool = True
     use_profiler: bool = False  # use torch profiler to monitoring traces, be careful as the logs will grow very fast

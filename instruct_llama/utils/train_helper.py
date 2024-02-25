@@ -3,7 +3,7 @@
 # See the accompanying LICENSE file for details.
 
 
-from typing import Tuple, List, Mapping, Text, Any
+from typing import Tuple, Optional, Union, List, Mapping, Text, Any
 import logging
 import numpy as np
 import math
@@ -127,7 +127,6 @@ def split_indices_into_bins(
 ) -> List[List[int]]:
     """Split indices to small bins."""
 
-    bin_size = int(bin_size)
     max_indices = int(max_indices)
     min_indices = int(min_indices)
 
@@ -135,10 +134,10 @@ def split_indices_into_bins(
         raise ValueError(f'Expect max_indices to be greater than bin_size, got {max_indices} and {bin_size}')
 
     # Split indices into 'bins' with bin_size.
-    indices = np.arange(min_indices, max_indices)
-
     if shuffle:
-        np.random.shuffle(indices)
+        indices = np.random.permutation(max_indices)
+    else:
+        indices = np.arange(min_indices, max_indices)
 
     indices_list = []
     for i in range(0, len(indices), bin_size):
@@ -154,48 +153,67 @@ def split_indices_into_bins(
     return indices_list
 
 
-def masked_mean(tensor: torch.Tensor, mask: torch.Tensor, dim: int = 1) -> torch.Tensor:
-    masked_tensor = tensor * mask
-    tensor_sum = masked_tensor.sum(dim=dim)
-    mask_sum = mask.sum(dim=dim)
-
-    # Avoid division by zero
-    mask_sum = torch.where(mask_sum <= 0, 1e-8, mask_sum)
-
-    mean = tensor_sum / mask_sum
-    return mean
+def masked_sum(values: torch.Tensor, mask: torch.Tensor, dim: Optional[Union[int, Tuple]] = None) -> torch.Tensor:
+    if dim is not None:
+        return (values * mask).sum(dim=dim)
+    else:
+        return (values * mask).sum()
 
 
-def masked_sum(tensor: torch.Tensor, mask: torch.Tensor, dim: int = 1) -> torch.Tensor:
-    masked_tensor = tensor * mask
-    tensor_sum = masked_tensor.sum(dim=dim)
-    return tensor_sum
+def masked_mean(values: torch.Tensor, mask: torch.Tensor, dim: Optional[Union[int, Tuple]] = None) -> torch.Tensor:
+    """Compute mean of tensor with a masked values."""
+    if dim is not None:
+        return (values * mask).sum(dim=dim) / mask.sum(dim=dim)
+    else:
+        return (values * mask).sum() / mask.sum()
 
 
-def masked_whiten(
-    tensor: torch.Tensor, mask: torch.Tensor, dim: int = 1, eps: float = 1e-8, shift_mean: bool = True
-) -> torch.Tensor:
-    masked_tensor = tensor * mask
-    mean = masked_mean(masked_tensor, mask, dim=dim)
+def masked_var(values: torch.Tensor, mask: torch.Tensor, unbiased: bool = True) -> torch.Tensor:
+    """Compute variance of tensor with masked values."""
+    mask_sum = mask.sum()
+    if mask_sum == 0 or mask_sum == 1:
+        raise ValueError(
+            f'The sum of the mask is {mask_sum}, which can happen when batch size of mask is 1, try increase the batch size'
+        )
 
-    if len(tensor.shape) > len(mean.shape) and len(mean.shape) == 1:
-        mean = mean.unsqueeze(1)
+    mean = masked_mean(values, mask)
+    centered_values = values - mean
+    variance = masked_mean(centered_values**2, mask)
+    if unbiased:
+        # note that if mask_sum == 1, then there is a division by zero issue
+        # to avoid it you just need to use a larger minibatch_size
+        bessel_correction = mask_sum / (mask_sum - 1)
+        variance = variance * bessel_correction
+    return variance
 
-    mean_centered = masked_tensor - mean
 
-    var = masked_mean(mean_centered**2, mask, dim=dim)
-    if len(tensor.shape) > len(var.shape) and len(var.shape) == 1:
-        var = var.unsqueeze(1)
-
-    # Avoid potential division by zero
-    var = torch.where(var <= 0, eps, var)
-
-    whitened = mean_centered * var.clamp(min=eps).rsqrt()
-
+def masked_whiten(values: torch.Tensor, mask: torch.Tensor, shift_mean: bool = True) -> torch.Tensor:
+    """Whiten values with masked values."""
+    mean, var = masked_mean(values, mask), masked_var(values, mask)
+    whitened = (values - mean) * torch.rsqrt(var + 1e-8)
     if not shift_mean:
         whitened += mean
-
     return whitened
+
+
+# def masked_whiten(values: torch.Tensor, mask: torch.Tensor, shift_mean: bool = True) -> torch.Tensor:
+#     assert torch.is_tensor(mask) and mask.dtype == torch.bool
+#     assert torch.is_tensor(values) and values.shape == mask.shape
+
+#     # Compute mean and variance only where mask is True
+#     mean = torch.mean(values[mask])
+#     var = torch.var(values[mask])
+
+#     # Initialize whitened tensor with zeros
+#     whitened = torch.zeros_like(values)
+
+#     # Compute whitened values only where mask is True
+#     whitened[mask] = (values[mask] - mean) * torch.rsqrt(var + 1e-8)
+
+#     # Optionally shift mean back
+#     if not shift_mean:
+#         whitened[mask] += mean
+#     return whitened
 
 
 def get_grad_norm_local(model) -> torch.Tensor:
@@ -209,9 +227,8 @@ def get_grad_norm_local(model) -> torch.Tensor:
 
 def get_grad_norm_fsdp(model, rank, world_size, sharding_strategy=ShardingStrategy.FULL_SHARD) -> torch.Tensor:
     local_norm = get_grad_norm_local(model)
-    op = torch.distributed.ReduceOp.SUM
     return_norm = local_norm.clone().detach().requires_grad_(False).to(rank) ** 2
-    dist.all_reduce(return_norm, op=op)
+    dist.all_reduce(return_norm, op=dist.ReduceOp.SUM)
     if sharding_strategy == ShardingStrategy.NO_SHARD:
         return_norm = return_norm / world_size
     return return_norm**0.5

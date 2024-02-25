@@ -8,7 +8,7 @@
 import logging
 import math
 from dataclasses import dataclass, asdict
-from typing import Any, Optional, Tuple, Iterable
+from typing import Any, Optional, Tuple, Iterable, Union, Dict, Text
 from typing_extensions import Self
 import numpy as np
 import torch
@@ -47,7 +47,7 @@ class ModelArgs:
     max_batch_size: int = 8  # for attention key, value caches
     max_seq_len: int = 2048
 
-    head_type: str = 'lm_head'  # 'lm_head', 'scalar_head'
+    head_type: str = 'lm_head'  # 'lm_head', 'scalar_head', 'dual_head'
     use_cache: bool = False  # should only use cache when do inference
 
     # dropout regularization
@@ -58,7 +58,7 @@ class ModelArgs:
     gradient_checkpointing: bool = False
 
     def __post_init__(self):
-        assert self.head_type in ('lm_head', 'scalar_head')
+        assert self.head_type in ('lm_head', 'scalar_head', 'dual_head')
 
     def dict(self):
         return {k: str(v) if not isinstance(v, (float, int, bool, type(None))) else v for k, v in asdict(self).items()}
@@ -310,6 +310,10 @@ class Transformer(nn.Module):
         elif self.params.head_type == 'scalar_head':
             logger.info('Creating LLaMA-2 model with scalar head ...')
             self.scalar_head = nn.Linear(params.dim, 1, bias=True)
+        elif self.params.head_type == 'dual_head':  # policy model with an additional value head
+            logger.info('Creating LLaMA-2 model with LM and scalar heads ...')
+            self.lm_head = nn.Linear(params.dim, params.vocab_size, bias=False)
+            self.scalar_head = nn.Linear(params.dim, 1, bias=True)
 
         self.freqs_cis = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.max_seq_len * 2)
 
@@ -323,7 +327,7 @@ class Transformer(nn.Module):
         for layer in self.layers:
             layer.attention.enable_cache()
 
-    def forward(self, tokens: torch.Tensor, start_pos: Optional[int] = 0) -> torch.Tensor:
+    def forward(self, tokens: torch.Tensor, start_pos: Optional[int] = 0) -> Union[torch.Tensor, Dict[Text, torch.Tensor]]:
         _bsz, seqlen = tokens.shape
         h = self.token_embeddings(tokens)
         h = self.embeddings_dropout(h)
@@ -333,9 +337,6 @@ class Transformer(nn.Module):
 
         mask = None
         if seqlen > 1:
-            # mask = torch.full((1, 1, seqlen, seqlen), float('-inf'), device=tokens.device)
-            # mask = torch.triu(mask, diagonal=start_pos + 1).type_as(h)
-
             mask = torch.full((seqlen, seqlen), float('-inf'), device=tokens.device)
             mask = torch.triu(mask, diagonal=1)
 
@@ -356,6 +357,11 @@ class Transformer(nn.Module):
             output = self.lm_head(h).float()
         elif self.params.head_type == 'scalar_head':
             output = self.scalar_head(h).float()
+        elif self.params.head_type == 'dual_head':
+            output = {
+                'policy_head': self.lm_head(h).float(),
+                'value_head': self.scalar_head(h).float(),
+            }
         else:
             output = h
 

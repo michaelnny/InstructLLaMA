@@ -54,13 +54,13 @@ class config:
     num_epochs: int = 5
     # accumulate gradients so for each iteration, the actual batch size is = train_batch_size x gradient_accum_steps
     train_batch_size: int = 4
-    gradient_accum_steps: int = 32
-    loss_scale: float = 1.0 / 16  # scale loss to account for gradient accumulation, we don't want to use a very small scale
+    gradient_accum_steps: int = 8
+    loss_scale: float = 1.0  # scale loss to account for gradient accumulation, we don't want to use a very small scale
     val_interval: int = 1000
     val_batch_size: int = 30
     val_steps: int = 20
     log_interval: int = 5  # log training metrics (loss, accuracy)
-    ckpt_interval: int = 1000  # save model checkpoints every N training iterations
+    ckpt_interval: int = 1000  # save model checkpoints every N Training steps
 
     # learning rate
     init_lr: float = 5e-6  # initial learning rate
@@ -80,7 +80,6 @@ class config:
     attn_dropout: float = 0.0
 
     mixed_precision: bool = True  # default to BF16, but if no native GPU support detected, will use FP16.
-    compile_model: bool = False  # Performance may be worser than eager mode
 
     # FSDP
     # when use fsdp_activation_checkpointing, will see 30-50% training slowdown, but can free up ~30% GPU RAM thus we can use larger batch size
@@ -98,5 +97,4 @@ class config:
     seed: int = 113
     log_dir: str = './logs/pretrain'  # save logs and traces
     ckpt_dir: str = './checkpoints/pretrain'
-    use_tensorboard: bool = True
     use_profiler: bool = False  # use torch profiler to monitoring traces, be careful as the logs will grow very fast

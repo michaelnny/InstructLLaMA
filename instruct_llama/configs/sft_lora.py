@@ -22,16 +22,20 @@ class config:
     train_datasources: Tuple[str] = (
         './datasets/dolly/train.pkl',
         './datasets/alpaca/train.pkl',
-        './datasets/squad/train.pkl',
         './datasets/deepmind_mathematics/train.pkl',
-        './datasets/commonsense_dialogues/train.pkl',
+        './datasets/hh_rlhf_finetune/train.pkl',  # 160k
+        './datasets/stack_exchange_finetune/train.pkl',  # 300k
+        # './datasets/squad/train.pkl',
+        # './datasets/commonsense_dialogues/train.pkl',
     )
     val_datasources: Tuple[str] = (
         './datasets/dolly/validation.pkl',
         './datasets/alpaca/validation.pkl',
-        './datasets/squad/validation.pkl',
-        './datasets/deepmind_mathematics/validation.pkl',
-        './datasets/commonsense_dialogues/validation.pkl',
+        './datasets/hh_rlhf_finetune/validation.pkl',
+        './datasets/stack_exchange_finetune/validation.pkl',
+        # './datasets/deepmind_mathematics/validation.pkl',
+        # './datasets/squad/validation.pkl',
+        # './datasets/commonsense_dialogues/validation.pkl',
     )
     dataloader_workers: int = 1
 
@@ -41,16 +45,16 @@ class config:
     full_pad: bool = False
 
     # training and validation loops
-    num_epochs: int = 5
+    num_epochs: int = 2
     # accumulate gradients so for each iteration, the actual batch size is = train_batch_size x gradient_accum_steps
     train_batch_size: int = 2
-    gradient_accum_steps: int = 64
-    loss_scale: float = 1.0 / 16  # scale loss to account for gradient accumulation, we don't want to use a very small scale
-    val_interval: int = 200
+    gradient_accum_steps: int = 16
+    loss_scale: float = 1.0 / 8  # scale loss to account for gradient accumulation, we don't want to use a very small scale
+    val_interval: int = 500
     val_batch_size: int = 30
     val_steps: int = 20
     log_interval: int = 5  # log training metrics (loss, accuracy)
-    ckpt_interval: int = 200  # save model checkpoints every N training iterations
+    ckpt_interval: int = 500  # save model checkpoints every N Training steps
 
     # LoRA configuration
     lora_r: int = 128
@@ -74,9 +78,9 @@ class config:
     quant_4bit_type: str = 'nf4'  # only supports 'fp4' or 'nf4'
 
     # learning rate, maybe use smaller lr if also train head since we don't apply LoRA head layer
-    init_lr: float = 3e-5  # initial learning rate
-    max_lr: float = 3e-4  # max learning rate after warm up
-    min_lr: float = 3e-4  # min learning rate after decay
+    init_lr: float = 2.5e-6  # initial learning rate
+    max_lr: float = 2.5e-5  # max learning rate after warm up
+    min_lr: float = 2.5e-5  # min learning rate after decay
     warmup_ratio: float = 0.03
 
     # prompt is less important than completion
@@ -89,7 +93,7 @@ class config:
     adam_betas: Tuple = (0.9, 0.95)
     adam_eps: float = 1e-5
     adam_fused: bool = True  # only applicable if not using bitsandbytes optimizer
-    grad_clip: float = 1.0
+    grad_clip: float = 5.0
 
     # dropout regularization
     embed_dropout: float = 0.0
@@ -97,11 +101,9 @@ class config:
 
     gradient_checkpointing: bool = False
     mixed_precision: bool = True  # default to BF16, but if no native GPU support detected, will use FP16.
-    compile_model: bool = False  # not working with QLoRA
 
     # others
     seed: int = 127
     log_dir: str = './logs/sft_lora'  # save logs and traces
     ckpt_dir: str = './checkpoints/sft_lora'
-    use_tensorboard: bool = True
     use_profiler: bool = False  # use torch profiler to monitoring traces, be careful as the logs will grow very fast

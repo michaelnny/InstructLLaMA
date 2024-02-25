@@ -1,9 +1,0 @@
-{
-  "data_structure": "A list of prompt:completion token sequences pairs.",
-  "home_page": "https://github.com/gururise/AlpacaDataCleaned",
-  "language": "English",
-  "name": "Alpaca_cleaned",
-  "num_train_samples": 48203,
-  "num_validation_samples": 2536,
-  "vocab_size": 32000
-}

@@ -206,5 +206,9 @@ class Transformer(llama.Transformer):
         elif self.params.head_type == 'scalar_head':
             logger.info('Creating LLaMA-2 model with scalar head ...')
             self.scalar_head = nn.Linear(params.dim, 1, bias=True)
+        elif self.params.head_type == 'dual_head':  # policy model with an additional value head
+            logger.info('Creating LLaMA-2 model with LM and scalar heads ...')
+            self.lm_head = nn.Linear(params.dim, params.vocab_size, bias=False)
+            self.scalar_head = nn.Linear(params.dim, 1, bias=True)
 
         self.freqs_cis = llama.precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.max_seq_len * 2)

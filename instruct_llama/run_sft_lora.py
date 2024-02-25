@@ -161,7 +161,7 @@ def run_validation_steps(
     """Run M validation steps"""
 
     tracker.reset()
-    inner_pbar = tqdm.tqdm(range(steps), colour='green', desc='Validation steps')
+    val_pbar = tqdm.tqdm(range(steps), colour='green', desc='Validation steps')
     for i, (x, y, loss_mask) in enumerate(loader):
         x, y, loss_mask = (
             x.to('cuda', non_blocking=True),
@@ -174,13 +174,12 @@ def run_validation_steps(
         num_acc, num_samples = compute_metrics(output.detach(), y.detach(), loss_mask.detach())
         tracker.update(losses.detach(), num_acc, num_samples)
 
-        if inner_pbar is not None:
-            inner_pbar.update(1)
+        val_pbar.update(1)
 
         if i >= steps:
             break
 
-    inner_pbar.close()
+    val_pbar.close()
 
 
 def custom_collate_fn(batch, pad_id: int, max_seq_len: int, full_pad: bool = False) -> Tuple[torch.Tensor]:
@@ -346,11 +345,6 @@ def main():
     # and the weights is quantized using bnb.functional.quantize_4bit
     model = model.to('cuda')
 
-    # seems not so helpful in terms of speed improvement
-    if cfg.compile_model:
-        logger.info('compile model using torch.compile() ...')
-        model = torch.compile(model)
-
     logger.info('Initializing optimizer ...')
 
     num_trainable, num_frozen = compute_num_trainable_params(model)
@@ -381,16 +375,13 @@ def main():
     create_ckpt_func = functools.partial(create_lora_checkpoint, train_bias=cfg.train_bias, train_head=cfg.train_head)
 
     torch_profiler = None
-    tb_writer = None
-    inner_pbar = tqdm.tqdm(range(max_train_steps), colour='blue', desc='Training steps')
+    tb_writer = SummaryWriter(os.path.join(cfg.log_dir, cfg.model_type))
+    train_pbar = tqdm.tqdm(range(max_train_steps), colour='blue', desc='Training steps')
     best_val_accuracy = 0.0
     train_steps = 0
 
     os.makedirs(cfg.log_dir, exist_ok=True)
     os.makedirs(cfg.ckpt_dir, exist_ok=True)
-
-    if cfg.use_tensorboard:
-        tb_writer = SummaryWriter(os.path.join(cfg.log_dir, cfg.model_type))
 
     # Careful as the logs will grow very fast
     if cfg.use_profiler:
@@ -415,7 +406,7 @@ def main():
             if iter % cfg.gradient_accum_steps == 0:
                 grad_norm = get_grad_norm_local(model)
                 update_step(model, optimizer, scheduler, cfg.grad_clip, scaler)
-                inner_pbar.update(1)
+                train_pbar.update(1)
                 train_steps += 1
 
                 if torch_profiler is not None:

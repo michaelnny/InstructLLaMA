@@ -1,9 +1,8 @@
 # Files too big
 *.tar
 *.zst
-datasets/hh-rlhf
-datasets/red_pajama_mini
-datasets/stack_exchange_preferences
+datasets/*
+
 
 # Checkpoints
 checkpoints/*

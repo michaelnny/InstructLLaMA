@@ -1,9 +1,0 @@
-{
-  "data_structure": "A list of prompt:completion token sequences pairs.",
-  "home_page": "https://rajpurkar.github.io/SQuAD-explorer",
-  "language": "English",
-  "name": "SQuAD",
-  "num_train_samples": 18875,
-  "num_validation_samples": 1204,
-  "vocab_size": 32000
-}

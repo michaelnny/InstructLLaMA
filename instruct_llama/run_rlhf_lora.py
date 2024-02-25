@@ -6,7 +6,7 @@
 """Train policy and value models using PPO algorithm (RL) and QLoRA, starting from fine-tuned model and reward model (RM) checkpoints."""
 
 import os
-from typing import Tuple, List, Union, Mapping, Text, Any, Callable
+from typing import Tuple, Optional, List, Union, Mapping, Dict, Text, Any, Callable
 from functools import partial
 import random
 import time
@@ -34,7 +34,6 @@ from instruct_llama.configs.rlhf_lora import config as cfg
 from instruct_llama.utils.custom_dataset import BlendedDataset, PromptOnlyDataset
 from instruct_llama.utils.schedule import CosineDecayWithWarmupLRScheduler
 from instruct_llama.utils.train_helper import (
-    create_trace_profiler,
     create_optimizer,
     get_grad_norm_local,
     masked_whiten,
@@ -44,211 +43,73 @@ from instruct_llama.utils.train_helper import (
 )
 from instruct_llama.utils.logger import create_logger
 from instruct_llama.utils.env import PromptEnv
-from instruct_llama.utils.normalizer import RunningMeanStd
 from instruct_llama.utils.checkpoint import create_lora_checkpoint
 from instruct_llama.generation import sample_top_p
+from instruct_llama.utils.rl_ppo import (
+    build_model,
+    clip_reward,
+    truncated_generalized_advantage_estimation,
+    find_begin_of_pattern,
+    AdaptiveKLController,
+)
 
 logger = create_logger()
 
 
-def clear_gpu_cache(rank=None):
+def clear_gpu_cache():
     torch.cuda.empty_cache()
 
 
-def convert_model_to_dtype(model: Transformer, compute_dtype):
-    # try to convert the model to half precision, otherwise we can't even move the 7B model to a single RTX 3090
-    for name, module in model.named_modules():
-        if 'norm' in name:  # for better performance, always use full precision for normalization layers
-            module = module.to(dtype=torch.float32)
-        else:
-            module = module.to(dtype=compute_dtype)
-
-
-def build_model(
-    vocab_size, ckpt_file, device, compute_dtype, not_trainable: bool = True, is_policy: bool = True, strict: bool = True
-) -> Transformer:
-    assert vocab_size > 0
-
-    model_args = LoraModelArgs.from_model_type(
-        model_type=cfg.policy_model_type if is_policy else cfg.reward_model_type,
-        # LoRA configurations, note if it's for inference then no need to user lora
-        lora_r=0 if not_trainable else cfg.lora_r,
-        lora_scaling=0 if not_trainable else cfg.lora_scaling,
-        lora_dropout=0 if not_trainable else cfg.lora_dropout,
-        # LoRA trainable layers, not need to apply LoRA if not trainable
-        lora_attn_query=False if not_trainable else cfg.lora_attn_query,
-        lora_attn_key=False if not_trainable else cfg.lora_attn_key,
-        lora_attn_value=False if not_trainable else cfg.lora_attn_value,
-        lora_attn_proj=False if not_trainable else cfg.lora_attn_proj,
-        lora_attn_mlp=False if not_trainable else cfg.lora_attn_mlp,
-        # Quantization configurations
-        quant_4bit=True if not_trainable else cfg.quant_4bit,  # always quantize frozen model to save GPU RAM
-        quant_lora_4bit=False if not_trainable else cfg.quant_lora_4bit,
-        quant_4bit_double=True if not_trainable else cfg.quant_4bit_double,
-        quant_4bit_type=cfg.quant_4bit_type,
-        quant_compute_dtype=compute_dtype,
-        # Regular configurations
-        head_type='lm_head' if is_policy else 'scalar_head',
-        use_cache=False,
-        max_seq_len=cfg.max_seq_len,
-        max_batch_size=cfg.selfplay_batch_size if is_policy and not not_trainable else 1,
-        embed_dropout=0.0 if not_trainable else cfg.embed_dropout,
-        attn_dropout=0.0 if not_trainable else cfg.attn_dropout,
-        gradient_checkpointing=False if not_trainable else cfg.gradient_checkpointing,
-    )
-
-    model = Transformer(model_args)
-
-    if os.path.exists(ckpt_file):
-        logger.info(f'Loading model checkpoint {ckpt_file!r} ...')
-        model_state = torch.load(ckpt_file)
-        model.load_state_dict(model_state, strict=strict)
-        del model_state  # free up CPU RAM
-
-    if device == 'cpu':
-        convert_model_to_dtype(model, torch.float32)
-    else:
-        convert_model_to_dtype(model, compute_dtype)
-
-    if not_trainable:
-        for p in model.parameters():
-            p.requires_grad = False
-
-    return model.to(device)
-
-
-def clip_reward(x, max_abs_reward) -> torch.Tensor:
-    if max_abs_reward > 0:
-        return torch.clamp(x, min=-max_abs_reward, max=max_abs_reward)
-    else:
-        return x
-
-
-def truncated_generalized_advantage_estimation(
-    r_t: torch.Tensor,
-    value_t: torch.Tensor,
-    value_tp1: torch.Tensor,
-    discount_tp1: torch.Tensor,
-    lambda_: float,
-) -> torch.Tensor:
-    """Computes truncated generalized advantage estimates for a sequence length k.
-
-    The advantages are computed in a backwards fashion according to the equation:
-    Âₜ = δₜ + (γλ) * δₜ₊₁ + ... + ... + (γλ)ᵏ⁻ᵗ⁺¹ * δₖ₋₁
-    where δₜ = rₜ + γₜ * v(sₜ₊₁) - v(sₜ).
-
-    See Proximal Policy Optimization Algorithms, Schulman et al.:
-    https://arxiv.org/abs/1707.06347
-
-    Args:
-      r_t: Sequence of rewards at times [0, k]
-      value_t: Sequence of values under π at times [0, k]
-      value_tp1: Sequence of values under π at times [1, k+1]
-      discount_tp1: Sequence of discounts at times [1, k+1]
-      lambda_: a scalar
-
-    Returns:
-      Multistep truncated generalized advantage estimation at times [0, k].
-    """
-
-    assert len(r_t.shape) == 1
-    assert len(value_t.shape) == 1
-    assert len(value_tp1.shape) == 1
-    assert len(discount_tp1.shape) == 1
-
-    lambda_ = torch.ones_like(discount_tp1) * lambda_  # If scalar, make into vector.
-
-    delta_t = r_t + discount_tp1 * value_tp1 - value_t
-
-    advantage_t = torch.zeros_like(delta_t, dtype=torch.float32)
-
-    gae_t = 0
-    for i in reversed(range(len(delta_t))):
-        gae_t = delta_t[i] + discount_tp1[i] * lambda_[i] * gae_t
-        advantage_t[i] = gae_t
-
-    return advantage_t
-
-
-def get_batched_transitions(micro_batch: List[Mapping[Text, torch.Tensor]], eos_id: int) -> Mapping[Text, torch.Tensor]:
-    """Essentially the same as a regular custom collate function for dataloader, except here we don't use dataloader"""
-    batch_size = len(micro_batch)
-    max_batch_len = max([len(item['tokens']) for item in micro_batch])
-
-    batched_tokens = torch.full((batch_size, max_batch_len), eos_id, dtype=torch.long)
-    batched_actions = torch.full((batch_size, max_batch_len), eos_id, dtype=torch.long)
-    batched_logprobs = torch.full((batch_size, max_batch_len), 0.0, dtype=torch.float)
-    batched_values = torch.full((batch_size, max_batch_len), 0.0, dtype=torch.float)
-    batched_returns = torch.full((batch_size, max_batch_len), 0.0, dtype=torch.float)
-    batched_advantages = torch.full((batch_size, max_batch_len), 0.0, dtype=torch.float)
-    batched_mask = torch.full((batch_size, max_batch_len), 0, dtype=torch.bool)
-
-    for i, item in enumerate(micro_batch):
-        seq_len = len(item['tokens'])
-        batched_tokens[i, :seq_len] = item['tokens']
-        batched_actions[i, :seq_len] = item['actions']
-        batched_logprobs[i, :seq_len] = item['logprobs']
-        batched_values[i, :seq_len] = item['values']
-        batched_returns[i, :seq_len] = item['returns']
-        batched_advantages[i, :seq_len] = item['advantages']
-        batched_mask[i, :seq_len] = item['mask']
-
-    return {
-        'tokens': batched_tokens,
-        'actions': batched_actions,
-        'logprobs': batched_logprobs,
-        'values': batched_values,
-        'returns': batched_returns,
-        'advantages': batched_advantages,
-        'mask': batched_mask,
-    }
-
-
-def find_begin_of_inst_index(input_list, pattern=[518, 25580, 29962]):
-    """Find the index of the [INST] token from the given list"""
-    pattern_length = len(pattern)
-    lst_length = len(input_list)
-    for i in range(lst_length - pattern_length + 1):
-        if input_list[i : i + pattern_length] == pattern:
-            return i
-
-    return -1  # Return -1 if pattern is not found
-
-
 class PPOAgent:
-
-    """PPO agent for self-play and learning"""
+    """PPO agent for self-play and learning, using two separated networks for policy and value"""
 
     def __init__(
         self,
         tokenizer: Tokenizer,
         ptx_loader: DataLoader,
         policy_model: Transformer,
-        value_model: Transformer,
         policy_optimizer: torch.optim.AdamW,
         policy_scheduler: CosineDecayWithWarmupLRScheduler,
+        value_model: Transformer,
         value_optimizer: torch.optim.AdamW,
         value_scheduler: CosineDecayWithWarmupLRScheduler,
-        update_epochs: int,
+        ppo_update_epochs: int,
         train_batch_size: int,
         gradient_accum_steps: int,
-        loss_scale: float = 1.0,
-        policy_clip_eps: float = 0.2,
-        value_clip_eps: float = 0.2,
-        clip_kl: float = 0.2,
-        kl_coef: float = 0.02,
-        entropy_coef: float = 0.0,
-        ptx_coef: float = 0.01,
-        discount: float = 1.0,
-        gae_lambda: float = 0.95,
-        policy_grad_clip: float = 2.0,
-        value_grad_clip: float = 10.0,
+        loss_scale: float,
+        policy_clip_eps: float,
+        value_clip_eps: float,
+        entropy_coef: float,
+        ptx_coef: float,
+        discount: float,
+        gae_lambda: float,
+        policy_grad_clip: float,
+        value_grad_clip: float,
+        truncate_token: Optional[Tuple[str]],
+        truncate_penalty_value: float,
         selfplay_log_interval: int = 10,
-        train_log_interval: int = 10,
+        train_log_interval: int = 5,
         policy_device: str = 'cuda',
         value_device: str = 'cuda',
+        kl_ctl: AdaptiveKLController = None,
         tb_writer: SummaryWriter = None,
     ):
+        assert 0 < loss_scale <= 1, loss_scale
+        assert ppo_update_epochs >= 1, ppo_update_epochs
+        assert train_batch_size >= 1, train_batch_size
+        assert gradient_accum_steps >= 1, gradient_accum_steps
+        assert 0 < policy_clip_eps < 0.5, policy_clip_eps
+        assert 0 <= value_clip_eps < 0.5, value_clip_eps
+        assert 0 <= entropy_coef < 0.1, entropy_coef
+        assert 0 <= ptx_coef, ptx_coef
+        assert 0.9 < discount <= 1, discount
+        assert 0.9 < gae_lambda <= 1, gae_lambda
+        assert policy_grad_clip >= 0, policy_grad_clip
+        assert value_grad_clip >= 0, value_grad_clip
+        if truncate_token is not None:
+            assert isinstance(truncate_token, Tuple), truncate_token
+        assert truncate_penalty_value <= 0, truncate_penalty_value
+
         self.tokenizer = tokenizer
         self.ptx_loader = ptx_loader
         self.policy_device = policy_device
@@ -259,16 +120,15 @@ class PPOAgent:
         self.policy_scheduler = policy_scheduler
         self.policy_grad_clip = policy_grad_clip
 
+        self.policy_model.disable_cache()
+        self.model_params = self.policy_model.params
+
         self.value_model = value_model.to(self.value_device)
         self.value_optimizer = value_optimizer
         self.value_scheduler = value_scheduler
         self.value_grad_clip = value_grad_clip
 
-        self.policy_model.disable_cache()
-        self.value_model.disable_cache()
-        self.model_params = self.policy_model.params
-
-        self.update_epochs = update_epochs
+        self.ppo_update_epochs = ppo_update_epochs
         self.train_batch_size = train_batch_size
         self.gradient_accum_steps = gradient_accum_steps
         self.loss_scale = loss_scale
@@ -276,10 +136,14 @@ class PPOAgent:
         self.policy_clip_eps = policy_clip_eps
         self.entropy_coef = entropy_coef
         self.ptx_coef = ptx_coef
-        self.clip_kl = clip_kl
-        self.kl_coef = kl_coef
+
         self.discount = discount
         self.gae_lambda = gae_lambda
+
+        self.kl_ctl: AdaptiveKLController = kl_ctl
+        self.truncate_token = truncate_token
+        self.truncate_penalty_value = truncate_penalty_value
+        self.apply_truncate_penalty = True if self.truncate_token is not None and self.truncate_penalty_value < 0 else False
 
         self.selfplay_log_interval = selfplay_log_interval
         self.train_log_interval = train_log_interval
@@ -290,11 +154,11 @@ class PPOAgent:
         self.c_value_update = 0
         self.c_train_episode = 0
         self.c_val_episode = 0
-        self.c_epoch = 0
 
     @torch.no_grad()
     def run_selfplay(
         self,
+        epoch: int,
         env: PromptEnv,
         num_episodes: int,
         batch_size: int,
@@ -302,45 +166,40 @@ class PPOAgent:
         top_p: float,
         min_gen_len: int,
         max_gen_len: int,
-        normalize_rewards: bool,
-        normalize_advantages: bool = False,
+        selfplay_sample_interval: int,
         is_training: bool = False,
-    ):
+    ) -> List[Dict[Mapping, torch.Tensor]]:
         self.policy_model.eval()
         self.value_model.eval()
 
-        batched_episodes = []
-        episode_c = 0
-        t0 = time.time()
+        # make room for policy model
+        if self.policy_device == self.value_device:
+            self.value_model.to('cpu')
 
+        batched_episodes = []
+
+        # guarantee that we'll have at least M episodes
+        episode_c = 0
+        discard_c = 0
         while episode_c < num_episodes:
             episodes = self.generate_batch_selfplay_episodes(
-                env, batch_size, temperature, top_p, max_gen_len, normalize_rewards
+                env, batch_size, temperature, top_p, min_gen_len, max_gen_len, is_training
             )
             batched_episodes.append(episodes)
-            episode_c += len(episodes['terminal_steps'])
+            current_bs = len(episodes['terminal_steps'])
+            episode_c += current_bs
+            discard_c += batch_size - current_bs
 
-        total_act_time = time.time() - t0
-        avg_act_time = total_act_time / num_episodes
+        if discard_c > 0:
+            logger.info(f'Discarded {discard_c} episodes with response tokens lesser than {min_gen_len}')
 
-        logger.info(
-            f'Finished generating {episode_c} episodes in {total_act_time:.2f} seconds, average time per episode is {avg_act_time:.2f} second'
-        )
+        if self.policy_device == self.value_device:
+            self.value_model.to(self.value_device)
 
-        t1 = time.time()
-        ppo_transitions = self.get_ppo_transitions_from_batched_episodes(
-            batched_episodes, min_gen_len, normalize_advantages, is_training
-        )
-
-        total_build_time = time.time() - t1
-        avg_build_time = total_build_time / len(ppo_transitions)
-        logger.info(
-            f'Finished processing {len(ppo_transitions)} episodes in {total_build_time:.2f} seconds, average time per episode is {avg_build_time:.2f} second'
-        )
-
-        self.log_selfplay_episode_stats(ppo_transitions, is_training)
-
-        return ppo_transitions
+        self.compute_state_values_for_batched_episodes(batched_episodes)
+        episodes = self.flatten_batched_episodes(batched_episodes)
+        self.log_selfplay_episode_stats(epoch, episodes, selfplay_sample_interval, is_training)
+        return episodes
 
     @torch.no_grad()
     def generate_batch_selfplay_episodes(
@@ -349,18 +208,20 @@ class PPOAgent:
         batch_size: int,
         temperature: float,
         top_p: float,
+        min_gen_len: int,
         max_gen_len: int,
-        normalize_rewards: bool,
+        is_training: bool = False,
     ) -> Mapping[Text, torch.Tensor]:
         """Run one batch episodes, where the code is adapted from the generation.py module,
         here we also store the intermediate transitions which are required to train the model using the PPO algorithm"""
-        assert batch_size >= 1
-        assert max_gen_len >= 12
+        assert min_gen_len >= 1
+        assert max_gen_len <= self.model_params.max_seq_len
+        assert batch_size >= 8
 
-        torch.cuda.empty_cache()
         self.policy_model.enable_cache()
+        torch.cuda.empty_cache()
 
-        # randomly sample a batch of prompts
+        # sample a batch of prompts randomly
         prompt_tokens = env.reset(batch_size)
 
         bsz = len(prompt_tokens)
@@ -369,35 +230,48 @@ class PPOAgent:
         min_prompt_len = min(len(t) for t in prompt_tokens)
         max_prompt_len = max(len(t) for t in prompt_tokens)
 
-        assert min_prompt_len > 2
-
+        assert min_prompt_len > 6
         total_len = min(self.model_params.max_seq_len, max_gen_len + max_prompt_len)
 
         pad_id = self.tokenizer.pad_id
         eos_id = self.tokenizer.eos_id
-        tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device='cuda')
+
+        tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device=self.policy_device)
         for k, t in enumerate(prompt_tokens):
-            tokens[k, : len(t)] = torch.tensor(t, dtype=torch.long, device='cuda')
+            tokens[k, : len(t)] = torch.tensor(t, dtype=torch.long, device=self.policy_device)
+
+        # store log probability for actions, this is referred as the 'behavior policy' in RL terminology
+        token_logprobs = torch.full((bsz, total_len), 0.0, dtype=torch.float, device=self.policy_device)
 
         prev_pos = 0
-        eos_reached = torch.tensor([False] * bsz, device='cuda')
+        eos_reached = torch.tensor([False] * bsz, device=self.policy_device)
         input_text_mask = tokens != pad_id
+
+        t0 = time.time()
 
         # RL agent starts selfplay
         for cur_pos in range(min_prompt_len, total_len):
-            output = self.policy_model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
-            logits = output[:, -1, :]  # [batch_size, 1, vocab_size]
+            logits = self.policy_model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
+            logits = logits[:, -1, :]  # [batch_size, vocab_size]
 
             if temperature > 0:
                 probs = torch.softmax(logits / temperature, dim=-1)
             else:
                 probs = torch.softmax(logits, dim=-1)
 
-            next_token = sample_top_p(probs, top_p).reshape(-1)
+            next_token = sample_top_p(probs, top_p).reshape(-1)  # [batch_size]
+
+            token_logprob = torch.gather(torch.log_softmax(logits, dim=-1), dim=1, index=next_token.unsqueeze(1)).squeeze(
+                1
+            )  # [batch_size]
 
             # only replace token if prompt has already been generated
             next_token = torch.where(input_text_mask[:, cur_pos], tokens[:, cur_pos], next_token)
             tokens[:, cur_pos] = next_token
+
+            token_logprob = torch.where(input_text_mask[:, cur_pos], token_logprobs[:, cur_pos], token_logprob)
+            token_logprobs[:, cur_pos] = token_logprob
+
             eos_reached |= (~input_text_mask[:, cur_pos]) & (next_token == eos_id)
             prev_pos = cur_pos
             if all(eos_reached):
@@ -407,88 +281,127 @@ class PPOAgent:
         self.policy_model.disable_cache()
         torch.cuda.empty_cache()
 
-        start_steps = torch.zeros((bsz,), dtype=torch.long, device='cuda')
-        terminal_steps = torch.zeros((bsz,), dtype=torch.long, device='cuda')
+        start_steps = torch.zeros((bsz,), dtype=torch.long, device=self.policy_device)
+        terminal_steps = torch.zeros((bsz,), dtype=torch.long, device=self.policy_device)
+        truncate_steps = torch.zeros((bsz,), dtype=torch.long, device=self.policy_device)
 
-        # cut tokens to:
-        # a. maximum generation length
-        # b. eos token
+        # cut tokens
         for i, toks in enumerate(tokens.tolist()):
-            start = len(prompt_tokens[i])
-            start_steps[i] = start
-            _toks = toks[start : start + max_gen_len]
+            start_idx = len(prompt_tokens[i])
+            start_steps[i] = start_idx
+            res_toks = toks[start_idx:]  # completion tokens
 
-            # cut to max gen len, -1 to avoid out of index
-            end_idx = min(start + max_gen_len, total_len) - 1
+            # cut to max gen len
+            end_idx = len(toks) - 1
 
-            # cut to eos token </eos>
-            if eos_id in _toks:
-                end_idx = start + _toks.index(eos_id)
+            # cut to eos token '</s>'
+            if eos_id in res_toks:
+                end_idx = start_idx + res_toks.index(eos_id)
                 assert toks[end_idx] == eos_id
-            # else:
-            #     # cut to begin of instruction token [INST]
-            #     begin_inst_idx = find_begin_of_inst_index(toks)
-            #     if begin_inst_idx > 0:
-            #         end_idx = start + begin_inst_idx
 
-            assert end_idx >= start and end_idx < total_len and end_idx <= start + max_gen_len
-            terminal_steps[i] = end_idx
+            if end_idx > start_idx and end_idx < total_len:
+                terminal_steps[i] = end_idx
 
-        # build up loss mask, where we only keep the completions tokens
+            # looking for special tokens like '[INST]' and something alike, so we can later add a penalty score
+            truncate_idx = 0
+            if self.apply_truncate_penalty:
+                for truncate_token in self.truncate_token:
+                    truncate_token_ids = self.tokenizer.encode(truncate_token)
+                    pen_start_idx = find_begin_of_pattern(res_toks, truncate_token_ids)
+                    if pen_start_idx > 0:
+                        truncate_idx = start_idx + pen_start_idx
+                        if toks[truncate_idx : truncate_idx + len(truncate_token_ids)] != truncate_token_ids:
+                            truncate_idx = 0
+                        break
+
+            if truncate_idx > 0 and truncate_idx > start_idx:
+                truncate_steps[i] = truncate_idx
+
+        # filter episodes where length of completion tokens are too short
+        valid_episodes = ((terminal_steps - start_steps) >= min_gen_len).to(self.policy_device)
+        num_discard = (~valid_episodes).sum().item()
+        if num_discard > 0:
+            tokens = tokens[valid_episodes, ...]
+            token_logprobs = token_logprobs[valid_episodes, ...]
+            start_steps = start_steps[valid_episodes]
+            terminal_steps = terminal_steps[valid_episodes]
+            truncate_steps = truncate_steps[valid_episodes]
+
+        # build up loss mask
         # for example, if we have a sequence of:
         # [1, 2, 3, 4, 5, 6, 7, -1, -1]
         # where:
         #   [1, 2, 3, 4] are prompt tokens
-        #   [5, 6, 7] are completion tokens
+        #   [5, 6, 7] are response tokens
         #   [-1, -1] are padding tokens
         #
         # then the mask will be:
-        # [False, False, False, False, True, True, True, False, False]
+        # [False, False, False, True, True, True, True, False, False]
         mask = torch.zeros_like(tokens, dtype=torch.bool, device='cpu')
-
         for i, (start_idx, end_idx) in enumerate(zip(start_steps.tolist(), terminal_steps.tolist())):
-            mask[i, start_idx : end_idx + 1] = True
-            tokens[i, end_idx + 1 :] = eos_id  # replace pad_id
+            mask[i, start_idx : end_idx + 1] = True  # +1 because high is exclusive
 
-        mask_float = mask.float().cuda()
+        # replace pad ids
+        tokens = torch.where(tokens == pad_id, eos_id, tokens)
+        mask_float = mask.float().cpu()
 
-        # shift one step to left to get the actions taken by the agent, this aligns with the RL transition convention: (s, a, logprob_a)
-        actions = torch.full((bsz, total_len), eos_id, dtype=torch.long, device='cuda')
-        actions[:, :-1] = tokens[:, 1:]
+        # shift one step to left to get the actions taken by the agent, this aligns with the RL transition convention: (s_t, a_t, logprob_a_t, v_t)
+        actions = torch.full((len(tokens), total_len), eos_id, dtype=torch.long, device='cpu')
+        actions[:, :-1] = tokens[:, 1:].clone().cpu()
 
-        # compute log probability for actions
-        output = self.policy_model.forward(tokens)
-        pi_dist = Categorical(logits=output)
-        logprobs = pi_dist.log_prob(actions)
+        logprobs = torch.zeros_like(token_logprobs, device='cpu')
+        logprobs[:, :-1] = token_logprobs[:, 1:].clone().cpu()
         logprobs *= mask_float
 
-        # Compute environment reward
-        env_rewards = env.step(tokens, terminal_steps)
-        # Compute pre-token KL penalties for completion tokens
-        kl = env.compute_kl_penalties(tokens, actions, logprobs, mask, self.kl_coef)
+        # # Compute state values, can't do it here cause CUDA OOM when using single GPU
+        # values = self.value_model(tokens.to(self.value_device)).squeeze(-1).cpu()
+        # values *= mask_float
 
-        if self.clip_kl > 0:
-            kl = torch.clamp(kl, min=-self.clip_kl, max=self.clip_kl)
+        # Compute environment reward using RM Model
+        scalar_rewards = env.step(tokens, terminal_steps).to('cpu')
 
-        # Combine environment reward and KL penalties together
-        rewards = torch.zeros_like(tokens, dtype=torch.float, device=kl.device)
-        for i, idx in enumerate(terminal_steps.tolist()):
-            rewards[i, idx] = env_rewards[i]
+        # Compute pre-token KL penalties for response tokens
+        kl = env.compute_kl_penalties(tokens, actions, logprobs)
+        kl = kl.cpu() * mask_float
 
-        rewards -= kl
-        rewards *= mask_float.to(kl.device)
+        # Update adaptive KL controller
+        if is_training:
+            self.kl_ctl.update(kl.sum(dim=1).mean().item(), len(terminal_steps))
 
-        if normalize_rewards:
-            rewards = masked_whiten(rewards, mask.to(rewards.device), shift_mean=False)
+        # RM model reward are zero except for terminal step
+        rewards = torch.zeros_like(tokens, dtype=torch.float, device='cpu')
+        rewards[torch.arange(len(terminal_steps)), terminal_steps] = scalar_rewards
+
+        # add pre-token KL penalties for the response tokens
+        kl_penalties = -self.kl_ctl.value * kl
+        rewards += kl_penalties
+
+        # add penalties to truncated tokens in the response
+        if self.apply_truncate_penalty:
+            truncate_masks = torch.zeros_like(tokens, dtype=torch.bool, device='cpu')
+            for i, (t, end_t) in enumerate(zip(truncate_steps.tolist(), terminal_steps.tolist())):
+                if t > 0:
+                    truncate_masks[i, t : end_t + 1] = True
+            truncate_penalties = truncate_masks.float() * self.truncate_penalty_value
+            rewards = torch.where(truncate_masks, self.truncate_penalty_value, rewards)
+        else:
+            truncate_penalties = torch.zeros_like(tokens, dtype=torch.bool, device='cpu')
+
+        t1 = time.time()
 
         episodes = {
             'tokens': tokens.cpu(),
             'actions': actions.cpu(),
             'logprobs': logprobs.cpu(),
+            # 'values': values.cpu(),
             'mask': mask.cpu(),
             'rewards': rewards.cpu(),
-            'env_rewards': env_rewards.cpu(),
+            'scalar_rewards': scalar_rewards.cpu(),  # the remaining are for logging only
             'kl': kl.cpu(),
+            'kl_coef': self.kl_ctl.value,
+            'kl_penalties': kl_penalties.cpu(),
+            'truncate_penalties': truncate_penalties.cpu(),
+            'episode_time': (t1 - t0) / len(terminal_steps),
             'start_steps': start_steps.cpu(),
             'terminal_steps': terminal_steps.cpu(),
         }
@@ -496,167 +409,223 @@ class PPOAgent:
         return episodes
 
     @torch.no_grad()
-    def get_ppo_transitions_from_batched_episodes(
-        self,
-        batched_episodes: List[Mapping[Text, torch.Tensor]],
-        min_gen_len: int,
-        normalize_advantages: bool,
-        is_training: bool = False,
-    ) -> Tuple[List[Mapping[Text, torch.Tensor]]]:
-        if is_training:
-            batched_episodes = self.compute_state_values_for_batched_episodes(batched_episodes)
-
-        episodes = self.flatten_batched_episodes(batched_episodes, min_gen_len)
-
-        if is_training:
-            episodes = self.compute_masked_returns_and_advantages(episodes, normalize_advantages)
-
-        return episodes
-
-    @torch.no_grad()
-    def compute_state_values_for_batched_episodes(
-        self, episodes_list: List[Mapping[Text, torch.Tensor]]
-    ) -> List[Mapping[Text, torch.Tensor]]:
-        processed_episodes = []
-        for episodes in episodes_list:
+    def compute_state_values_for_batched_episodes(self, batched_episodes: List[Mapping[Text, torch.Tensor]]) -> None:
+        for episodes in batched_episodes:
             tokens = episodes['tokens'].to(self.value_device)
             values = self.value_model(tokens).squeeze(-1)  # [batch_size, seq_len]
             mask = episodes['mask'].to(self.value_device)
             values *= mask.float()
             episodes['values'] = values.cpu()
-            processed_episodes.append(episodes)
-
-        return processed_episodes
-
-    @torch.no_grad()
-    def compute_masked_returns_and_advantages(
-        self, episodes: List[Mapping[Text, torch.Tensor]], normalize_advantages: bool
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        results = []
-
-        for episode in episodes:
-            values = episode['values']
-            rewards = episode['rewards']
-            mask = episode['mask']
-
-            r_t = rewards
-            v_t = values
-            # pad value at t_p1 step to zero
-            v_tp1 = torch.zeros_like(v_t, device='cpu')
-            v_tp1[:-1] = v_t[1:]
-
-            done_tp1 = torch.zeros_like(v_tp1, dtype=torch.bool, device='cpu')
-            done_tp1[-1] = True
-            discount_tp1 = (~done_tp1).float() * self.discount
-
-            adv_t = truncated_generalized_advantage_estimation(r_t, v_t, v_tp1, discount_tp1, self.gae_lambda)
-            return_t = adv_t + v_t
-
-            if normalize_advantages:
-                adv_t = masked_whiten(adv_t, mask, dim=0, shift_mean=True)
-
-            episode['returns'] = return_t * mask.float()
-            episode['advantages'] = adv_t * mask.float()
-            results.append(episode)
-
-        return results
 
     def flatten_batched_episodes(
-        self, episodes_list: List[Mapping[Text, torch.Tensor]], min_len: int
+        self, batched_episodes: List[Mapping[Text, torch.Tensor]]
     ) -> List[Mapping[Text, torch.Tensor]]:
+        """Turn a list of batched episodes into a flat list of episodes"""
         results = []
-        skipped = 0
-        for episodes in episodes_list:
-            # for each episode in current batch
-            for i in range(len(episodes['terminal_steps'])):
+        for episodes in batched_episodes:  # for each batch
+            for i in range(len(episodes['terminal_steps'])):  # for each episode in current batch
                 start_step = episodes['start_steps'][i]
                 terminal_step = episodes['terminal_steps'][i]
-
-                if terminal_step - start_step < min_len:
-                    skipped += 1
-                    continue
-
-                end = terminal_step + 1  # plus one because high is exclusive
-
+                end = terminal_step + 1  # +1 because high is exclusive
                 episode = {
                     'tokens': episodes['tokens'][i, :end],
                     'actions': episodes['actions'][i, :end],
                     'logprobs': episodes['logprobs'][i, :end],
+                    'values': episodes['values'][i, :end],
                     'mask': episodes['mask'][i, :end],
+                    'scalar_reward': episodes['scalar_rewards'][i],
                     'rewards': episodes['rewards'][i, :end],
                     'kl': episodes['kl'][i, :end],
-                    'env_rewards': episodes['env_rewards'][i],
+                    'kl_coef': episodes['kl_coef'],
+                    'kl_penalties': episodes['kl_penalties'][i, :end],
+                    'truncate_penalties': episodes['truncate_penalties'][i, :end],
+                    'episode_time': episodes['episode_time'],
                     'start_step': start_step,
-                    'terminal_steps': terminal_step,
+                    'terminal_step': terminal_step,
                 }
-
-                # only training episodes have values
-                if 'values' in episodes:
-                    episode['values'] = episodes['values'][i, :end]
 
                 results.append(episode)
 
-        logger.info(f'Skipped {skipped} episodes with completion tokens lesser than {min_len}')
-
         return results
 
-    def run_ppo_training_steps(self, transitions: List[Mapping[Text, torch.Tensor]]) -> None:
-        """
-        Uses PPO and the RL agent generated self-play episodes to train the policy and value networks M epochs.
-        """
-        # Run M epochs to update policy model parameters
-        logger.info(
-            f'Starting to run {self.update_epochs} epochs over {len(transitions)} episodes to update PPO policy model ...'
-        )
+    @torch.no_grad()
+    def prepare_ppo_transitions(
+        self,
+        batch: List[Mapping[Text, torch.Tensor]],
+        whiten_rewards: bool,
+        whiten_advantages: bool,
+    ) -> None:
+        """Compute GAE advantages for the batch, and optionally normalize reward and advantages wile doing so"""
+        batch_size = len(batch)
+        max_batch_len = max([len(item['tokens']) for item in batch])
+
+        batched_values = torch.full((batch_size, max_batch_len), 0.0, dtype=torch.float)
+        batched_rewards = torch.full((batch_size, max_batch_len), 0.0, dtype=torch.float)
+        batched_returns = torch.full((batch_size, max_batch_len), 0.0, dtype=torch.float)
+        batched_advantages = torch.full((batch_size, max_batch_len), 0.0, dtype=torch.float)
+        batched_mask = torch.full((batch_size, max_batch_len), 0, dtype=torch.bool)
+
+        # batch the rewards so we can later normalize it if needed
+        for i, item in enumerate(batch):
+            seq_len = len(item['tokens'])
+            batched_mask[i, :seq_len] = item['mask']
+            batched_rewards[i, :seq_len] = item['rewards']
+            batched_values[i, :seq_len] = item['values']
+
+        if whiten_rewards:
+            batched_rewards = masked_whiten(batched_rewards, batched_mask, shift_mean=False)
+
+        # compute GAE advantages one episode at a time
+        for i, item in enumerate(batch):
+            seq_len = len(item['tokens'])
+            returns, advantages = self.compute_masked_returns_and_advantages(
+                batched_values[i, :seq_len], batched_rewards[i, :seq_len], batched_mask[i, :seq_len]
+            )
+            batched_returns[i, :seq_len] = returns
+            batched_advantages[i, :seq_len] = advantages
+
+        if whiten_advantages:
+            batched_advantages = masked_whiten(batched_advantages, batched_mask, shift_mean=True)
+
+        # add the computed GAE advantages and returns back to the episode samples
+        for i, item in enumerate(batch):
+            seq_len = len(item['tokens'])
+            item['returns'] = batched_returns[i, :seq_len]
+            item['advantages'] = batched_advantages[i, :seq_len]
+
+    @torch.no_grad()
+    def compute_masked_returns_and_advantages(
+        self,
+        values: torch.Tensor,
+        rewards: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute GAE advantages for a single episode"""
+
+        r_t = rewards * mask.float()
+        v_t = values * mask.float()
+
+        # make sure state value for the terminal step is zero
+        v_t[-1] = 0
+        done_tp1 = torch.zeros_like(v_t, dtype=torch.bool, device='cpu')
+        # mark terminal step, note we mark last two steps since it's for 't plus 1'
+        done_tp1[-2:] = True
+
+        # pad value at t_p1 step to zero
+        v_tp1 = torch.zeros_like(v_t, device='cpu')
+        v_tp1[:-1] = v_t[1:]
+
+        discount_tp1 = (~done_tp1).float() * self.discount
+
+        adv_t = truncated_generalized_advantage_estimation(r_t, v_t, v_tp1, discount_tp1, self.gae_lambda)
+        return_t = adv_t + v_t
+
+        return_t *= mask.float()
+        adv_t *= mask.float()
+        return return_t, adv_t
+
+    @torch.no_grad()
+    def get_batched_transitions(
+        self,
+        batch: List[Mapping[Text, torch.Tensor]],
+    ) -> Mapping[Text, torch.Tensor]:
+        """Essentially the same as a regular custom collate function for dataloader, except here we also compute GAE advantages for the batch"""
+        batch_size = len(batch)
+        max_batch_len = max([len(item['tokens']) for item in batch])
         eos_id = self.tokenizer.eos_id
+
+        batched_tokens = torch.full((batch_size, max_batch_len), eos_id, dtype=torch.long)
+        batched_actions = torch.full((batch_size, max_batch_len), eos_id, dtype=torch.long)
+        batched_logprobs = torch.full((batch_size, max_batch_len), 0.0, dtype=torch.float)
+        batched_values = torch.full((batch_size, max_batch_len), 0.0, dtype=torch.float)
+        batched_returns = torch.full((batch_size, max_batch_len), 0.0, dtype=torch.float)
+        batched_advantages = torch.full((batch_size, max_batch_len), 0.0, dtype=torch.float)
+        batched_mask = torch.full((batch_size, max_batch_len), 0, dtype=torch.bool)
+
+        for i, item in enumerate(batch):
+            seq_len = len(item['tokens'])
+            batched_tokens[i, :seq_len] = item['tokens']
+            batched_actions[i, :seq_len] = item['actions']
+            batched_logprobs[i, :seq_len] = item['logprobs']
+            batched_values[i, :seq_len] = item['values']
+            batched_mask[i, :seq_len] = item['mask']
+            batched_returns[i, :seq_len] = item['returns']
+            batched_advantages[i, :seq_len] = item['advantages']
+
+        return {
+            'tokens': batched_tokens,
+            'actions': batched_actions,
+            'logprobs': batched_logprobs,
+            'values': batched_values,
+            'returns': batched_returns,
+            'advantages': batched_advantages,
+            'mask': batched_mask,
+        }
+
+    def run_ppo_training_steps(
+        self,
+        episodes: List[Mapping[Text, torch.Tensor]],
+        whiten_rewards: bool,
+        whiten_advantages: bool,
+    ) -> None:
+        """
+        Uses PPO and the RL agent generated selfplay episodes to train the policy network.
+        """
+
+        # Compute GAE advantages once over all episodes, since the same episode transitions will be used multiple times
+        self.prepare_ppo_transitions(episodes, whiten_rewards, whiten_advantages)
 
         # make room for policy model
         if self.policy_device == self.value_device:
             self.value_model.to('cpu')
 
+        # Run M epochs to update policy model
+        # we use two loops because we can't host the two models at the same time with a single GPU
         self.policy_model.disable_cache()
-        self.policy_model.to(self.policy_device)
         self.policy_model.train()
+        self.policy_model.to(self.policy_device)
+        torch.cuda.empty_cache()
 
-        for _ in range(self.update_epochs):
-            # Split transitions into micro batches
-            batch_indices = split_indices_into_bins(self.train_batch_size, len(transitions), shuffle=True, drop_last=True)
-            micro_batches = [get_batched_transitions([transitions[i] for i in indices], eos_id) for indices in batch_indices]
+        for _ in range(self.ppo_update_epochs):
+            # Split episodes into micro batches
+            batch_indices = split_indices_into_bins(self.train_batch_size, len(episodes), shuffle=True, drop_last=True)
+            micro_batches = [self.get_batched_transitions([episodes[i] for i in indices]) for indices in batch_indices]
 
             for i in range(0, len(micro_batches), self.gradient_accum_steps):
                 stats = self.update_policy_model(micro_batches[i : i + self.gradient_accum_steps])
                 if self.c_policy_update % self.train_log_interval == 0:
                     self.log_train_stats(stats, True)
 
-        # Run M epochs to update state value model parameters, we use two loops
-        # because we can't host the two models at the same time with a single GPU
-        logger.info(
-            f'Starting to run {self.update_epochs} epochs over {len(transitions)} episodes to update PPO value model ...'
-        )
-
-        # make room for value model
+        # make room for value model, we need the value model to compute state values during PPO transition preparation
         if self.policy_device == self.value_device:
             self.policy_model.to('cpu')
 
         self.value_model.disable_cache()
         self.value_model.to(self.value_device)
         self.value_model.train()
+        torch.cuda.empty_cache()
 
-        for _ in range(self.update_epochs):
+        # Run M epochs to update value model parameters
+        for _ in range(self.ppo_update_epochs):
             # Split transitions into micro batches
-            batch_indices = split_indices_into_bins(self.train_batch_size, len(transitions), shuffle=True, drop_last=True)
-            micro_batches = [get_batched_transitions([transitions[i] for i in indices], eos_id) for indices in batch_indices]
+            batch_indices = split_indices_into_bins(self.train_batch_size, len(episodes), shuffle=True, drop_last=True)
+            micro_batches = [self.get_batched_transitions([episodes[i] for i in indices]) for indices in batch_indices]
 
             for i in range(0, len(micro_batches), self.gradient_accum_steps):
                 stats = self.update_value_model(micro_batches[i : i + self.gradient_accum_steps])
                 if self.c_value_update % self.train_log_interval == 0:
                     self.log_train_stats(stats, False)
 
-        # restore original device
+        torch.cuda.empty_cache()
+
+        # ready for selfplay
         self.policy_model.to(self.policy_device)
 
-    def compute_ptx_pretrain_loss(self) -> float:
-        total_loss = 0
+    def compute_ptx_pretrain_loss(self) -> List[float]:
+        losses = []
+        if self.ptx_loader is None:
+            return losses
+
         for i, (x, y) in enumerate(self.ptx_loader):
             x = x.to(self.policy_device)
             y = y.to(self.policy_device)
@@ -668,12 +637,11 @@ class PPOAgent:
             scaled_loss = loss * self.loss_scale
             scaled_loss.backward()
 
-            total_loss += loss.detach().item()
-
+            losses.append(loss.detach().item())
             if i >= self.gradient_accum_steps:
                 break
 
-        return total_loss
+        return losses
 
     def update_policy_model(
         self,
@@ -684,31 +652,29 @@ class PPOAgent:
         self.policy_optimizer.zero_grad()
 
         stats = {
-            'pg_loss': 0,
-            'entropy_loss': 0,
-            'ptx_loss': 0,
-            'total_loss': 0,
-            'entropy': 0,
-            'approx_kl': 0,
+            'pg_loss': [],
+            'entropy': [],
+            'entropy_loss': [],
+            'ptx_loss': [],
         }
 
         t0 = time.time()
         # accumulate gradients over N micro batches
-        for micro_batch in micro_batches:
-            tokens = (micro_batch['tokens']).to(dtype=torch.long, device=self.policy_device)
-            actions = (micro_batch['actions']).to(dtype=torch.long, device=self.policy_device)  # Actions are discrete
-            behavior_logprobs = (micro_batch['logprobs']).to(dtype=torch.float, device=self.policy_device)
-            advantages = (micro_batch['advantages']).to(dtype=torch.float, device=self.policy_device)
-            mask = (micro_batch['mask']).to(dtype=torch.float, device=self.policy_device)
+        for batch in micro_batches:
+            tokens = (batch['tokens']).to(dtype=torch.long, device=self.policy_device)
+            actions = (batch['actions']).to(dtype=torch.long, device=self.policy_device)
+            behavior_logprobs = (batch['logprobs']).to(dtype=torch.float, device=self.policy_device)
+            advantages = (batch['advantages']).to(dtype=torch.float, device=self.policy_device)
+            mask = (batch['mask']).to(dtype=torch.float, device=self.policy_device)
 
-            # Given past states, get predicted action probabilities and state value
+            # Given past states, get predicted action probabilities
             pi_logits = self.policy_model(tokens)
 
-            pi_dist = Categorical(logits=pi_logits)
-            pi_logprobs = pi_dist.log_prob(actions)
-            entropy = pi_dist.entropy()
+            pi_logprobs = torch.gather(torch.log_softmax(pi_logits, dim=-1), dim=2, index=actions.unsqueeze(2)).squeeze(2)
+            pd = torch.softmax(pi_logits, dim=-1)
+            entropy = torch.logsumexp(pi_logits, dim=-1) - torch.sum(pd * pi_logits, dim=-1)
 
-            assert pi_logprobs.shape == behavior_logprobs.shape
+            assert pi_logprobs.shape == behavior_logprobs.shape  # [batch_size, seqlen]
 
             # Compute PPO clipped surrogate objective
             ratio = torch.exp(pi_logprobs - behavior_logprobs)
@@ -717,12 +683,9 @@ class PPOAgent:
 
             # apply loss mask
             assert entropy.shape == pg_loss.shape == mask.shape
-            entropy = masked_mean(entropy, mask)
-            pg_loss = masked_mean(pg_loss, mask)
+            entropy = masked_mean(entropy, mask.detach())
+            pg_loss = masked_mean(pg_loss, mask.detach())
 
-            # Averaging over batch dimension
-            pg_loss = torch.mean(pg_loss)
-            entropy = torch.mean(entropy)
             entropy_loss = self.entropy_coef * entropy
 
             # Negative sign to indicate we want to maximize the policy gradient objective function and entropy
@@ -730,23 +693,19 @@ class PPOAgent:
             scaled_loss = loss * self.loss_scale  # scale the loss to account for gradient accumulation
             scaled_loss.backward()
 
-            # track training statistics
-            approx_kl = 0.5 * torch.mean(torch.square(pi_logprobs.detach() - behavior_logprobs.detach()))
+            # logging only
+            stats['pg_loss'].append(pg_loss.detach().item())
+            stats['entropy'].append(entropy.detach().item())
+            if self.entropy_coef > 0:
+                stats['entropy_loss'].append(entropy_loss.detach().item())
 
-            stats['pg_loss'] += pg_loss.detach().item()
-            stats['entropy_loss'] += entropy_loss.detach().item()
-            stats['total_loss'] += -loss.detach().item()  # use the original ones when logging
-            stats['entropy'] += entropy.detach().item()
-            stats['approx_kl'] += approx_kl.detach().item()
-
-        # Compute ptx loss, mixing pretraining gradients into PPO,
+        # Compute ptx loss, mixing pre-training gradients into PPO,
         # we do it separately because a single backward() call will cause CUDA OOM
         if self.ptx_coef > 0:
-            ptx_loss = self.compute_ptx_pretrain_loss()
-            stats['ptx_loss'] += ptx_loss
-            stats['total_loss'] += ptx_loss
+            ptx_losses = self.compute_ptx_pretrain_loss()
+            stats['ptx_loss'] = ptx_losses
 
-        grad_norm = get_grad_norm_local(self.policy_model)
+        pi_grad_norm = get_grad_norm_local(self.policy_model)
 
         if self.policy_grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(
@@ -757,17 +716,15 @@ class PPOAgent:
 
         self.policy_optimizer.step()
         self.policy_scheduler.step()
+
         t1 = time.time()
 
         self.c_policy_update += 1
-
         # Average over accumulated steps
-        stats = {k: v / len(micro_batches) for k, v in stats.items()}
-
+        stats = {k: np.mean(v) for k, v in stats.items() if len(v) > 0}
         stats['learning_rate'] = self.policy_optimizer.param_groups[0]['lr']
-        stats['grad_norm'] = grad_norm.item()
+        stats['grad_norm'] = pi_grad_norm.item()
         stats['step_time'] = t1 - t0
-
         return stats
 
     def update_value_model(
@@ -779,8 +736,8 @@ class PPOAgent:
         self.value_optimizer.zero_grad()
 
         stats = {
-            'error': 0,
-            'loss': 0,
+            'error': [],
+            'loss': [],
         }
 
         t0 = time.time()
@@ -792,12 +749,12 @@ class PPOAgent:
             returns = (batch['returns']).to(dtype=torch.float, device=self.value_device)
             mask = (batch['mask']).to(dtype=torch.float, device=self.value_device)
 
-            # Given past states, get predicted action probabilities and state value
+            # Given past states, get predicted state value
             pred_values = self.value_model(tokens).squeeze(-1)
 
             assert pred_values.shape == returns.shape
 
-            # Why doing this clipping? Is this really necessary?
+            # Is this value clipping really necessary?
             # https://github.com/openai/lm-human-preferences/blob/cbfd210bb8b08f6bc5c26878c10984b90f516c66/lm_human_preferences/train_policy.py#L343C38-L347
             if self.value_clip_eps > 0:
                 pred_values_clipped = torch.clamp(pred_values, values - self.value_clip_eps, values + self.value_clip_eps)
@@ -811,19 +768,16 @@ class PPOAgent:
 
             # apply loss mask
             assert value_loss.shape == mask.shape
+            value_loss = masked_mean(value_loss, mask.detach())
+            pred_error = masked_mean(pred_error, mask.detach())
 
-            value_loss = masked_mean(value_loss, mask)
-            pred_error = masked_mean(pred_error, mask)
-
-            # Averaging over batch dimension
-            loss = torch.mean(value_loss)
-            scaled_loss = loss * self.loss_scale  # scale the loss to account for gradient accumulation
+            scaled_loss = value_loss * self.loss_scale  # scale the loss to account for gradient accumulation
             scaled_loss.backward()
 
-            stats['error'] += pred_error.detach().mean().item()
-            stats['loss'] += loss.detach().item()
+            stats['loss'].append(value_loss.detach().item())
+            stats['error'].append(pred_error.detach().mean().item())
 
-        grad_norm = get_grad_norm_local(self.value_model)
+        v_grad_norm = get_grad_norm_local(self.value_model)
 
         if self.value_grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(
@@ -840,40 +794,38 @@ class PPOAgent:
         self.c_value_update += 1
 
         # Average over accumulated steps
-        stats = {k: v / len(micro_batches) for k, v in stats.items()}
-
+        stats = {k: np.mean(v) for k, v in stats.items() if len(v) > 0}
         stats['learning_rate'] = self.value_optimizer.param_groups[0]['lr']
-        stats['grad_norm'] = grad_norm.item()
+        stats['grad_norm'] = v_grad_norm.item()
         stats['step_time'] = t1 - t0
-
         return stats
 
     def log_selfplay_episode_stats(
         self,
+        epoch: int,
         episodes: List[Mapping[Text, torch.Tensor]],
+        selfplay_sample_interval: int,
         is_training: bool = False,
     ) -> Tuple[List[Mapping[Text, Any]], Mapping[Text, Any]]:
-        if is_training:
-            self.c_epoch += 1
+        tb_prefix = 'train_episodes' if is_training else 'val_episodes'
 
-        episode_prefix = 'selfplay_episodes_train' if is_training else 'selfplay_episodes_val'
-        epoch_prefix = 'selfplay_epochs_train' if is_training else 'selfplay_epochs_val'
-        episodes_stats = []
-
+        stats_list = []
         for episode in episodes:
             mask = episode['mask']
             stats = {
-                'steps': (episode['terminal_steps'] - episode['start_step']).item(),
-                'env_reward': episode['env_rewards'].item(),
-                'reward': masked_sum(episode['rewards'], mask, 0).item(),
-                'kl': masked_sum(episode['kl'], mask, 0).item(),
+                'episode_steps': (episode['terminal_step'] - episode['start_step']).item(),
+                'scalar_reward': episode['scalar_reward'].item(),
+                'rewards_with_penalties': torch.sum(episode['rewards'] * mask.float()).item(),
+                'kl': torch.sum(episode['kl'] * mask.float()).item(),
+                'kl_penalties': torch.sum(episode['kl_penalties'] * mask.float()).item(),
+                'kl_coef': episode['kl_coef'],
+                'episode_time': episode['episode_time'],
             }
 
-            if is_training:
-                stats['returns'] = masked_mean(episode['returns'], mask, 0).item()
-                stats['advantages'] = masked_mean(episode['advantages'], mask, 0).item()
+            if self.truncate_penalty_value < 0:
+                stats['truncate_penalties'] = torch.sum(episode['truncate_penalties'] * mask.float()).item()
 
-            episodes_stats.append(stats)
+            stats_list.append(stats)
 
             if is_training:
                 self.c_train_episode += 1
@@ -882,39 +834,39 @@ class PPOAgent:
                 self.c_val_episode += 1
                 episode_count = self.c_val_episode
 
-            if episode_count % self.selfplay_log_interval == 0 and self.tb_writer:
-                for k, v in stats.items():
-                    if isinstance(v, (int, float)):
-                        self.tb_writer.add_scalar(f'{episode_prefix}/{k}', v, episode_count)
+            if self.tb_writer:
+                if episode_count % self.selfplay_log_interval == 0:
+                    for k, v in stats.items():
+                        if isinstance(v, (int, float)):
+                            self.tb_writer.add_scalar(f'{tb_prefix}/{k}', v, episode_count)
 
-        episodes_reward = [s['reward'] for s in episodes_stats]
-        episodes_env_reward = [s['env_reward'] for s in episodes_stats]
-        episodes_kl = [s['kl'] for s in episodes_stats]
-        episodes_steps = [s['steps'] for s in episodes_stats]
+                # sample generated text
+                if episode_count % selfplay_sample_interval == 0:
+                    prompt_tokens = episode['tokens'][: episode['start_step'] + 1].tolist()
+                    response_tokens = episode['tokens'][episode['start_step'] + 1 : episode['terminal_step'] + 1].tolist()
+                    prompt_text = self.tokenizer.decode(prompt_tokens)
+                    response_text = self.tokenizer.decode(response_tokens)
 
-        aggregated_stats = {
-            'env_reward_mean': np.mean(episodes_env_reward),
-            'env_reward_std': np.std(episodes_env_reward),
-            'kl_mean': np.mean(episodes_kl),
-            'kl_std': np.std(episodes_kl),
-            'reward_mean': np.mean(episodes_reward),
-            'reward_std': np.std(episodes_reward),
-            'episode_steps': np.mean(episodes_steps),
-        }
+                    # Works best when enable 'MarkDown' in tensorboard
+                    self.tb_writer.add_text(
+                        f'{tb_prefix}_sample',
+                        f"**Prompt**: {prompt_text}   <br><br>**Response**: {response_text}   <br><br>**Reward**: {stats['scalar_reward']:.2f}",
+                        episode_count,
+                    )
 
-        if is_training:
-            aggregated_stats['returns_mean'] = np.mean([s['returns'] for s in episodes_stats])
-            aggregated_stats['advantages_mean'] = np.mean([s['advantages'] for s in episodes_stats])
+        # aggregate over epoch
+        aggr_keys = stats_list[0].keys()
+        epoch_stats = {}
+        for k in aggr_keys:
+            epoch_stats[k] = np.mean([d[k] for d in stats_list])
 
-        prefix = 'Train epoch self-play statistics' if is_training else 'Validation epoch self-play statistics'
-        logger.info(f'{prefix}: {aggregated_stats}')
-
+        epoch_tb_prefix = 'train_epochs' if is_training else 'val_epochs'
         if self.tb_writer:
-            for k, v in aggregated_stats.items():
+            for k, v in epoch_stats.items():
                 if isinstance(v, (int, float)):
-                    self.tb_writer.add_scalar(f'{epoch_prefix}/{k}', v, self.c_epoch)
+                    self.tb_writer.add_scalar(f'{epoch_tb_prefix}/{k}', v, epoch)
 
-    def log_train_stats(self, stats, is_policy: bool = False) -> None:
+    def log_train_stats(self, stats: Dict[Text, Any], is_policy: bool = False) -> None:
         tb_prefix = 'ppo_policy' if is_policy else 'ppo_value'
         step_count = self.c_policy_update if is_policy else self.c_value_update
         if self.tb_writer is not None:
@@ -922,8 +874,15 @@ class PPOAgent:
                 if isinstance(v, (int, float)):
                     self.tb_writer.add_scalar(f'{tb_prefix}/{k}', v, step_count)
 
-        prefix = 'Train policy statistics' if is_policy else 'Train value statistics'
-        logger.info(f'{prefix} steps {step_count}\n{stats}')
+
+def init_head_weights(model: Transformer):
+    if hasattr(model, 'scalar_head'):
+        head = model.scalar_head
+        logger.info('Initializing weights for scalar head ...')
+
+        init_std = 1.0 / np.sqrt(model.params.dim)
+        torch.nn.init.normal_(head.weight, std=init_std)
+        torch.nn.init.zeros_(head.bias)
 
 
 def main():
@@ -931,9 +890,10 @@ def main():
     assert cfg.selfplay_log_interval >= 1
     assert cfg.gradient_accum_steps >= 1
     assert 0 < cfg.loss_scale <= 1
+    assert cfg.min_gen_len >= 1
     assert cfg.train_batch_size >= 1
     assert cfg.ckpt_interval >= 1
-    assert cfg.train_episodes_per_epoch >= (cfg.gradient_accum_steps * cfg.train_batch_size)
+    assert cfg.rollout_size >= (cfg.gradient_accum_steps * cfg.train_batch_size)
 
     batch_size = int(cfg.train_batch_size * cfg.gradient_accum_steps)
 
@@ -943,14 +903,12 @@ def main():
         raise ValueError(f'Invalid RM model checkpoint {cfg.rm_ckpt_file!r}, aborting ...')
     if not os.path.exists(cfg.policy_ckpt_file):
         raise ValueError(f'Invalid policy model checkpoint {cfg.policy_ckpt_file!r}, aborting ...')
-    if not os.path.exists(cfg.value_ckpt_file):
-        raise ValueError(f'Invalid value model checkpoint {cfg.value_ckpt_file!r}, aborting ...')
-
     if not (torch.version.cuda and torch.cuda.is_bf16_supported()):
         raise RuntimeError('The script only supports training using CUDA and torch.bfloat16, but GPU does not support it.')
-
-    if not any(['cuda' in k for k in (cfg.env_device, cfg.policy_device, cfg.value_device)]):
+    if not any(['cuda' in k for k in (cfg.env_device, cfg.policy_device)]):
         raise ValueError('Bitsandbytes 4bit quantization only works with CUDA, aborting ...')
+    if cfg.ptx_coef > 0:
+        assert cfg.train_ptx_datasources is not None
 
     # --------------- Load datasets ---------------
 
@@ -968,15 +926,17 @@ def main():
         'sampler': None,
     }
 
-    train_ptx_dataset = BlendedDataset(
-        data_sources=cfg.train_ptx_datasources,
-        max_seq_len=cfg.max_seq_len,
-        seed=cfg.seed,
-    )
+    train_ptx_loader = None
+    if cfg.train_ptx_datasources is not None:
+        train_ptx_dataset = BlendedDataset(
+            data_sources=cfg.train_ptx_datasources,
+            max_seq_len=cfg.max_seq_len,
+            seed=cfg.seed,
+        )
 
-    train_ptx_loader = DataLoader(train_ptx_dataset, **cuda_kwargs)
+        train_ptx_loader = DataLoader(train_ptx_dataset, **cuda_kwargs)
 
-    logger.info(f'PTX pretrain dataset metadata:\n{train_ptx_dataset.get_metadata()}')
+        logger.info(f'PTX pretrain dataset metadata:\n{train_ptx_dataset.get_metadata()}')
 
     train_prompt_dataset = PromptOnlyDataset(
         data_sources=cfg.train_prompt_datasources,
@@ -1005,20 +965,24 @@ def main():
 
     logger.info('Initializing SFT and RM models ...')
     sft_model = build_model(
+        model_cfg=cfg,
         vocab_size=vocab_size,
         ckpt_file=cfg.sft_ckpt_file,
         device=cfg.env_device,
         compute_dtype=compute_dtype,
-        not_trainable=True,
-        is_policy=True,
+        frozen=True,
+        model_type=cfg.policy_model_type,
+        head_type='lm_head',
     )
     reward_model = build_model(
+        model_cfg=cfg,
         vocab_size=vocab_size,
         ckpt_file=cfg.rm_ckpt_file,
         device=cfg.env_device,
         compute_dtype=compute_dtype,
-        not_trainable=True,
-        is_policy=False,
+        frozen=True,
+        model_type=cfg.reward_model_type,
+        head_type='scalar_head',
     )
 
     clip_reward_fn = partial(clip_reward, max_abs_reward=cfg.clip_env_reward)
@@ -1027,7 +991,7 @@ def main():
         reward_model=reward_model,
         sft_model=sft_model,
         normalize_reward=cfg.normalize_env_rewards,
-        normalizer_ckpt=cfg.rm_norm_ckpt_file,
+        normalizer_ckpt=cfg.rm_normalizer_ckpt_file,
         clip_reward_fn=clip_reward_fn,
         device=cfg.env_device,
     )
@@ -1036,40 +1000,44 @@ def main():
         reward_model=reward_model,
         sft_model=sft_model,
         normalize_reward=cfg.normalize_env_rewards,
-        normalizer_ckpt=cfg.rm_norm_ckpt_file,
+        normalizer_ckpt=cfg.rm_normalizer_ckpt_file,
         clip_reward_fn=clip_reward_fn,
         device=cfg.env_device,
     )
 
-    logger.info('Initializing PPO policy and value models ...')
+    logger.info('Initializing PPO policy and value model ...')
 
     # Load model checkpoint using strict=False,
-    # because there are missing keys due to LoRA weights not contained in checkpoint state
+    # because there are missing keys due to LoRA weights and the value head weights not contained in checkpoint state
     policy_model = build_model(
+        model_cfg=cfg,
         vocab_size=vocab_size,
         ckpt_file=cfg.policy_ckpt_file,
         device=cfg.policy_device,
         compute_dtype=compute_dtype,
-        not_trainable=False,
-        is_policy=True,
+        frozen=False,
+        model_type=cfg.policy_model_type,
+        head_type='lm_head',
         strict=False,
     )
 
     value_model = build_model(
+        model_cfg=cfg,
         vocab_size=vocab_size,
         ckpt_file=cfg.value_ckpt_file,
         device=cfg.value_device,
         compute_dtype=compute_dtype,
-        not_trainable=False,
-        is_policy=False,
+        frozen=False,
+        model_type=cfg.value_model_type,
+        head_type='scalar_head',
         strict=False,
     )
 
     mark_only_lora_as_trainable(policy_model, train_bias=cfg.train_bias, train_head=cfg.train_head)
     mark_only_lora_as_trainable(value_model, train_bias=cfg.train_bias, train_head=cfg.train_head)
 
-    max_train_steps = int(cfg.update_epochs * (cfg.max_episodes / batch_size))
-    num_epochs = cfg.max_episodes // cfg.train_episodes_per_epoch
+    max_train_steps = int(cfg.ppo_update_epochs * (cfg.max_episodes / batch_size))
+    num_epochs = cfg.max_episodes // cfg.rollout_size
 
     policy_optimizer = create_optimizer(
         model=policy_model,
@@ -1086,9 +1054,10 @@ def main():
         init_lr=cfg.policy_init_lr,
         max_lr=cfg.policy_max_lr,
         min_lr=cfg.policy_min_lr,
-        warmup_steps=cfg.policy_warmup_steps,
+        warmup_steps=cfg.policy_lr_warmup_steps,
         max_decay_steps=max_train_steps,
     )
+
     value_optimizer = create_optimizer(
         model=value_model,
         lr=cfg.value_init_lr,
@@ -1098,12 +1067,13 @@ def main():
         fused=cfg.adam_fused,
         paged_adamw=cfg.use_paged_adamw,
     )
+
     value_scheduler = CosineDecayWithWarmupLRScheduler(
         optimizer=value_optimizer,
         init_lr=cfg.value_init_lr,
         max_lr=cfg.value_max_lr,
         min_lr=cfg.value_min_lr,
-        warmup_steps=cfg.value_warmup_steps,
+        warmup_steps=cfg.value_lr_warmup_steps,
         max_decay_steps=max_train_steps,
     )
 
@@ -1116,14 +1086,17 @@ def main():
         value_model=value_model,
         value_optimizer=value_optimizer,
         value_scheduler=value_scheduler,
-        update_epochs=cfg.update_epochs,
+        ppo_update_epochs=cfg.ppo_update_epochs,
         train_batch_size=cfg.train_batch_size,
         gradient_accum_steps=cfg.gradient_accum_steps,
         loss_scale=cfg.loss_scale,
         policy_clip_eps=cfg.policy_clip_eps,
         value_clip_eps=cfg.value_clip_eps,
-        clip_kl=cfg.clip_kl,
-        kl_coef=cfg.kl_coef,
+        kl_ctl=AdaptiveKLController(
+            init_kl_coef=cfg.init_kl_coef, adaptive=cfg.adaptive_kl, target=cfg.kl_target, horizon=cfg.adaptive_kl_horizon
+        ),
+        truncate_token=cfg.truncate_token,
+        truncate_penalty_value=cfg.truncate_penalty_value,
         entropy_coef=cfg.entropy_coef,
         ptx_coef=cfg.ptx_coef,
         discount=cfg.discount,
@@ -1134,7 +1107,7 @@ def main():
         train_log_interval=cfg.train_log_interval,
         policy_device=cfg.policy_device,
         value_device=cfg.value_device,
-        tb_writer=SummaryWriter(os.path.join(cfg.log_dir, cfg.policy_model_type)) if cfg.use_tensorboard else None,
+        tb_writer=SummaryWriter(os.path.join(cfg.log_dir, cfg.policy_model_type)),
     )
 
     # --------------- Start Training ---------------
@@ -1144,34 +1117,38 @@ def main():
     os.makedirs(os.path.join(cfg.ckpt_dir, 'policy'), exist_ok=True)
     os.makedirs(os.path.join(cfg.ckpt_dir, 'value'), exist_ok=True)
 
-    for epoch in range(1, num_epochs + 1):
+    for epoch in range(1, num_epochs + 1):  # one epoch is just M episodes
         logger.info(f'Epoch {epoch}')
-        logger.info(f'Starting to generate {cfg.train_episodes_per_epoch} train episodes ...')
+        logger.info(f'Starting to generate {cfg.rollout_size} train episodes ...')
 
-        transitions = ppo_agent.run_selfplay(
+        train_episodes = ppo_agent.run_selfplay(
+            epoch=epoch,
             env=train_env,
-            num_episodes=cfg.train_episodes_per_epoch,
+            num_episodes=cfg.rollout_size,
             batch_size=cfg.selfplay_batch_size,
             temperature=cfg.train_temperature,
             top_p=cfg.train_top_p,
             min_gen_len=cfg.min_gen_len,
-            max_gen_len=cfg.max_seq_len - cfg.max_prompt_len,
-            normalize_rewards=cfg.normalize_rewards,
-            normalize_advantages=cfg.normalize_advantages,
+            max_gen_len=cfg.max_seq_len,
+            selfplay_sample_interval=cfg.selfplay_sample_interval,
             is_training=True,
         )
 
         # poor solution to swap model between devices, so the training can run without CUDA OOM
-        if cfg.env_device != 'cpu' and cfg.env_device == cfg.policy_device or cfg.env_device == cfg.value_device:
+        if cfg.env_device != 'cpu' and (cfg.env_device == cfg.policy_device or cfg.env_device == cfg.value_device):
             reward_model.to('cpu')
             sft_model.to('cpu')
 
-        logger.info(f'Starting to train the agent using {len(transitions)} selfplay episodes ...')
+        logger.info(f'Starting to train the agent using {len(train_episodes)} selfplay episodes ...')
 
         torch.cuda.empty_cache()
-        ppo_agent.run_ppo_training_steps(transitions=transitions)
+        ppo_agent.run_ppo_training_steps(
+            episodes=train_episodes,
+            whiten_rewards=cfg.whiten_rewards,
+            whiten_advantages=cfg.whiten_advantages,
+        )
 
-        if cfg.env_device != 'cpu' and cfg.env_device == cfg.policy_device or cfg.env_device == cfg.value_device:
+        if cfg.env_device != 'cpu' and (cfg.env_device == cfg.policy_device or cfg.env_device == cfg.value_device):
             reward_model.to(cfg.env_device)
             sft_model.to(cfg.env_device)
 
@@ -1185,7 +1162,7 @@ def main():
             )
             create_lora_checkpoint(
                 value_model,
-                os.path.join(cfg.ckpt_dir, f'value/lora_{cfg.reward_model_type}-epoch-{epoch}.pth'),
+                os.path.join(cfg.ckpt_dir, f'value/lora_{cfg.value_model_type}-epoch-{epoch}.pth'),
                 cfg.train_bias,
                 cfg.train_head,
             )
@@ -1194,15 +1171,15 @@ def main():
         if cfg.var_interval > 0 and epoch % cfg.var_interval == 0:
             logger.info(f'Starting to generate {cfg.val_episodes_per_epoch} validation episodes ...')
             _ = ppo_agent.run_selfplay(
+                epoch=epoch,
                 env=eval_env,
                 num_episodes=cfg.val_episodes_per_epoch,
                 batch_size=cfg.selfplay_batch_size,
                 temperature=cfg.val_temperature,
                 top_p=cfg.val_top_p,
                 min_gen_len=cfg.min_gen_len,
-                max_gen_len=cfg.max_seq_len - cfg.max_prompt_len,
-                normalize_rewards=cfg.normalize_rewards,
-                normalize_advantages=False,  # don't compute advantages during inference
+                max_gen_len=cfg.max_seq_len,
+                selfplay_sample_interval=max(10, cfg.selfplay_sample_interval * 0.1),
                 is_training=False,
             )
 

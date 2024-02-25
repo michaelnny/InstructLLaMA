@@ -78,7 +78,7 @@ class DataSource:
 
 
 class BlendedDataset(IterableDataset):
-    """A blended dataset used for pre-training.
+    """A blended dataset used for pre-training. Where we concatenate different documents, which are separated by a EOS token.
 
     It supports mixed data sources, where we can define the weights of each data source.
     Additionally, it also supports shard the dataset based on the world size.
@@ -203,6 +203,8 @@ class BlendedDataset(IterableDataset):
 
 
 class FineTuneDataset(Dataset):
+    """For supervised fune-tuning, where we have pair of prompt:completion tokens."""
+
     def __init__(self, data_sources: Iterable[str], max_seq_len: int = 2048, max_samples: int = 0) -> None:
         """
         Args:
@@ -266,6 +268,11 @@ class FineTuneDataset(Dataset):
 
 
 class ComparisonsDataset(Dataset):
+    """Comparison preference dataset for training reward model. Where each sample has one prompt token, plus >= 2 ranked completions.
+
+    Where we assume the best completion is ranked 0.
+    """
+
     def __init__(self, data_sources: Iterable[str], max_seq_len: int = 2048, max_samples: int = 0) -> None:
         """
         Args:
@@ -343,6 +350,8 @@ class ComparisonsDataset(Dataset):
 
 
 class PromptOnlyDataset(Dataset):
+    """A simple dataset contains prompt only tokens for RL. Where we can sample a batch of prompts uniformly."""
+
     def __init__(
         self,
         data_sources: Iterable[str],
@@ -407,8 +416,8 @@ class PromptOnlyDataset(Dataset):
         return len(self.data)
 
     def sample(self, size: int = 1) -> List[List[int]]:
+        """Sample a batch uniformly"""
         indices = self.random_state.randint(low=0, high=self.num_samples, size=size)
-
         return [self.data[i] for i in indices]
 
     def get_metadata(self):
