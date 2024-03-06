@@ -25,7 +25,7 @@ sys.path.append(str(wd))
 
 from instruct_llama.models.model import ModelArgs, Transformer
 from instruct_llama.models.tokenizer import Tokenizer
-from instruct_llama.utils.prompt_builder import (
+from instruct_llama.core.prompt_builder import (
     Message,
     Dialog,
     ChatPrediction,
@@ -238,7 +238,7 @@ class Llama:
         return [{'generation': {'role': 'assistant', 'content': self.tokenizer.decode(t)}} for t in generation_tokens]
 
 
-def sample_top_p(probs, p):
+def sample_top_p(probs: torch.Tensor, p: float) -> torch.Tensor:
     probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)
     probs_sum = torch.cumsum(probs_sort, dim=-1)
     mask = probs_sum - probs_sort > p
@@ -247,3 +247,35 @@ def sample_top_p(probs, p):
     next_token = torch.multinomial(probs_sort, num_samples=1)
     next_token = torch.gather(probs_idx, -1, next_token)
     return next_token
+
+
+def top_k_logits(logits: torch.Tensor, k: float, eps: float = 1e-10) -> torch.Tensor:
+    k = min(k, logits.size(-1))  # Safety check
+    if k > 0:
+        # Remove all tokens with a probability less than the last token of the top-k
+        indices_to_remove = logits < torch.topk(logits, k)[0][..., -1, None]
+        logits = logits.masked_fill(indices_to_remove, eps)
+
+    return logits
+
+
+def top_p_logits(logits: torch.Tensor, p: float, eps: float = 1e-10) -> torch.Tensor:
+    if p > 0:
+        sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+        cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+
+        # Remove tokens with cumulative probability above the threshold
+        sorted_indices_to_remove = cumulative_probs > p
+        # Shift the indices to the right to keep also the first token above the threshold
+        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+        sorted_indices_to_remove[..., 0] = 0
+
+        # scatter sorted tensors to original indexing
+        indices_to_remove = sorted_indices_to_remove.scatter(dim=1, index=sorted_indices, src=sorted_indices_to_remove)
+        logits = logits.masked_fill(indices_to_remove, eps)
+    return logits
+
+
+def sample_from_logits(logits: torch.Tensor) -> torch.Tensor:
+    probs = torch.softmax(logits, dim=-1)
+    return torch.multinomial(probs, num_samples=1)

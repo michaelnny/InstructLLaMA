@@ -3,7 +3,7 @@
 # See the accompanying LICENSE file for details.
 
 
-"""Train policy and value models using PPO algorithm (RL) with LoRA, starting from fine-tuned model and reward model (RM) checkpoints."""
+"""Train policy and value models using PPO algorithm (RL), starting from fine-tuned model and reward model (RM) checkpoints."""
 
 import os
 import random
@@ -22,16 +22,15 @@ wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 
 
-from instruct_llama.models.model_lora import Transformer, LoraModelArgs
+from instruct_llama.models.model import Transformer, ModelArgs
 from instruct_llama.models.tokenizer import Tokenizer
-from instruct_llama.models.lora import mark_only_lora_as_trainable
-from instruct_llama.configs.rlhf_lora import config as cfg
+from instruct_llama.configs.rlhf import config as cfg
 from instruct_llama.core.custom_dataset import BlendedDataset, PromptOnlyDataset
 from instruct_llama.core.schedule import CosineDecayWithWarmupLRScheduler
-from instruct_llama.core.train_helper import create_optimizer, compute_num_trainable_params
+from instruct_llama.core.train_helper import make_model_layer_trainable, create_optimizer, compute_num_trainable_params
 from instruct_llama.core.rl_ppo import AdaptiveKLController, PPOAgent
 from instruct_llama.utils.logger import create_logger
-from instruct_llama.utils.checkpoint import create_lora_checkpoint
+from instruct_llama.utils.checkpoint import create_checkpoint
 
 
 logger = create_logger()
@@ -52,19 +51,6 @@ def build_model(
     compute_dtype,
     model_type: str,
     max_seq_len: int,
-    lora_r: int = 0,
-    lora_scaling: float = 1.0,
-    lora_dropout: float = 0.0,
-    lora_attn_query: bool = False,
-    lora_attn_key: bool = False,
-    lora_attn_value: bool = False,
-    lora_attn_proj: bool = False,
-    lora_attn_mlp: bool = False,
-    lora_head: bool = False,
-    quant_4bit: bool = False,
-    quant_lora_4bit: bool = False,
-    quant_4bit_double: bool = False,
-    quant_4bit_type: str = 'nf4',
     max_batch_size: int = 1,
     embed_dropout: float = 0.0,
     attn_dropout: float = 0.0,
@@ -76,28 +62,11 @@ def build_model(
 ) -> Transformer:
     assert vocab_size > 0
 
-    model_args = LoraModelArgs.from_model_type(
+    model_args = ModelArgs.from_model_type(
         model_type=model_type,
-        # LoRA configurations
-        lora_r=0 if frozen else lora_r,
-        lora_scaling=0 if frozen else lora_scaling,
-        lora_dropout=0 if frozen else lora_dropout,
-        # LoRA trainable layers, not need to apply LoRA if not trainable
-        lora_attn_query=False if frozen else lora_attn_query,
-        lora_attn_key=False if frozen else lora_attn_key,
-        lora_attn_value=False if frozen else lora_attn_value,
-        lora_attn_proj=False if frozen else lora_attn_proj,
-        lora_attn_mlp=False if frozen else lora_attn_mlp,
-        lora_head=False if frozen else lora_head,
-        # Quantization configurations
-        quant_4bit=quant_4bit,
-        quant_lora_4bit=False if frozen else quant_lora_4bit,
-        quant_4bit_double=quant_4bit_double,
-        quant_4bit_type=quant_4bit_type,
-        quant_compute_dtype=compute_dtype,
+        vocab_size=vocab_size,
         # Regular configurations
         head_type=head_type,
-        vocab_size=vocab_size,
         use_cache=False,
         max_seq_len=max_seq_len,
         max_batch_size=(max_batch_size if (head_type == 'dual_head' or head_type == 'lm_head') and not frozen else 1),
@@ -234,20 +203,6 @@ def main():
         attn_dropout=cfg.attn_dropout,
         gradient_checkpointing=cfg.gradient_checkpointing,
         frozen=False,
-        strict=False,
-        lora_r=cfg.policy_lora_r,
-        lora_scaling=cfg.policy_lora_scaling,
-        lora_dropout=cfg.policy_lora_dropout,
-        lora_attn_query=cfg.policy_lora_attn_query,
-        lora_attn_key=cfg.policy_lora_attn_key,
-        lora_attn_value=cfg.policy_lora_attn_value,
-        lora_attn_proj=cfg.policy_lora_attn_proj,
-        lora_attn_mlp=cfg.policy_lora_attn_mlp,
-        lora_head=cfg.policy_lora_head,
-        quant_4bit=cfg.policy_quant_4bit,
-        quant_lora_4bit=cfg.policy_quant_lora_4bit,
-        quant_4bit_double=cfg.policy_quant_4bit_double,
-        quant_4bit_type=cfg.policy_quant_4bit_type,
     )
 
     value_model = build_model(
@@ -261,28 +216,26 @@ def main():
         attn_dropout=cfg.attn_dropout,
         gradient_checkpointing=cfg.gradient_checkpointing,
         frozen=False,
-        strict=False,
-        lora_r=cfg.value_lora_r,
-        lora_scaling=cfg.value_lora_scaling,
-        lora_dropout=cfg.value_lora_dropout,
-        lora_attn_query=cfg.value_lora_attn_query,
-        lora_attn_key=cfg.value_lora_attn_key,
-        lora_attn_value=cfg.value_lora_attn_value,
-        lora_attn_proj=cfg.value_lora_attn_proj,
-        lora_attn_mlp=cfg.value_lora_attn_mlp,
-        lora_head=cfg.value_lora_head,
-        quant_4bit=cfg.value_quant_4bit,
-        quant_lora_4bit=cfg.value_quant_lora_4bit,
-        quant_4bit_double=cfg.value_quant_4bit_double,
-        quant_4bit_type=cfg.value_quant_4bit_type,
     )
 
-    mark_only_lora_as_trainable(policy_model, cfg.policy_train_bias)
+    # freeze first N decoder layers and make last M-N decoder layers and output layer trainable
+    policy_trainable_layers = ['post_norm', 'lm_head']
+    value_trainable_layers = ['post_norm', 'scalar_head']
+    for i in range(cfg.policy_frozen_layers, policy_model.n_layers):
+        policy_trainable_layers.append(f'layers.{i}')
+    for i in range(cfg.value_frozen_layers, value_model.n_layers):
+        value_trainable_layers.append(f'layers.{i}')
+
+    logger.info(f'PPO policy trainable layers:\n{policy_trainable_layers}')
+    make_model_layer_trainable(policy_model, policy_trainable_layers)
+
     num_trainable, num_frozen = compute_num_trainable_params(policy_model)
     logger.info(f'PPO policy number of trainable parameters: {num_trainable:,}')
     logger.info(f'PPO policy number of frozen parameters: {num_frozen:,}')
 
-    mark_only_lora_as_trainable(value_model, cfg.value_train_bias)
+    logger.info(f'PPO value trainable layers:\n{value_trainable_layers}')
+    make_model_layer_trainable(value_model, value_trainable_layers)
+
     num_trainable, num_frozen = compute_num_trainable_params(value_model)
     logger.info(f'PPO value number of trainable parameters: {num_trainable:,}')
     logger.info(f'PPO value number of frozen parameters: {num_frozen:,}')
@@ -400,16 +353,8 @@ def main():
 
         # regular checkpointing
         if epoch % cfg.ckpt_interval == 0:
-            create_lora_checkpoint(
-                policy_model,
-                os.path.join(cfg.ckpt_dir, f'policy/lora_{cfg.policy_model_type}-epoch-{epoch}.pth'),
-                cfg.policy_train_bias,
-            )
-            create_lora_checkpoint(
-                value_model,
-                os.path.join(cfg.ckpt_dir, f'value/lora_{cfg.value_model_type}-epoch-{epoch}.pth'),
-                cfg.policy_train_bias,
-            )
+            create_checkpoint(policy_model, os.path.join(cfg.ckpt_dir, f'policy/{cfg.policy_model_type}-epoch-{epoch}.pth'))
+            create_checkpoint(value_model, os.path.join(cfg.ckpt_dir, f'value/{cfg.value_model_type}-epoch-{epoch}.pth'))
 
         # validation episodes
         if cfg.var_interval > 0 and epoch % cfg.var_interval == 0:
@@ -430,16 +375,8 @@ def main():
             )
 
     # create final checkpoints
-    create_lora_checkpoint(
-        policy_model,
-        os.path.join(cfg.ckpt_dir, f'policy/lora_{cfg.policy_model_type}-epoch-{epoch}.pth'),
-        cfg.policy_train_bias,
-    )
-    create_lora_checkpoint(
-        value_model,
-        os.path.join(cfg.ckpt_dir, f'value/lora_{cfg.value_model_type}-epoch-{epoch}.pth'),
-        cfg.value_train_bias,
-    )
+    create_checkpoint(policy_model, os.path.join(cfg.ckpt_dir, f'policy/{cfg.policy_model_type}-epoch-{epoch}.pth'))
+    create_checkpoint(value_model, os.path.join(cfg.ckpt_dir, f'value/{cfg.value_model_type}-epoch-{epoch}.pth'))
 
 
 if __name__ == '__main__':

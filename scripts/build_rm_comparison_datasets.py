@@ -37,7 +37,7 @@ from instruct_llama.utils.file_helper import (
     read_zipped_jsonl_file,
     count_words,
 )
-from instruct_llama.utils.prompt_builder import build_prompt_completion, Dialog
+from instruct_llama.core.prompt_builder import build_prompt_completion, Dialog
 
 
 logger = create_logger()
@@ -203,9 +203,7 @@ def _process_single_stackexchange_file(
         if count_words(question) < min_question_words:
             continue
 
-        answers = _filter_answers(
-            answers, min_responses=min_responses, max_responses=max_responses, remove_zero_score=remove_zero_score
-        )
+        answers = _filter_answers(answers, min_responses=min_responses, max_responses=max_responses, remove_zero_score=remove_zero_score)
         if len(answers) < min_responses:
             continue
 
@@ -244,7 +242,7 @@ def _convert_to_llama_chat_format(raw_text) -> Dialog:
         pair = pair.replace(',  ', ', ').replace('.  ', '. ').replace('?  ', '? ').replace('!  ', '! ')
         contents = pair.split('\n\nAssistant: ')
         # skip some bad samples
-        if len(contents) != 2:
+        if len(contents) != 2 or any(['Assistant:' in t or 'Human:' in t for t in contents]):
             return dialog
 
         dialog.append({'role': 'user', 'content': contents[0]})
@@ -313,9 +311,7 @@ def process_hh_rlhf_dataset(
     meta_output_file = os.path.join(output_dir, 'meta.json')
 
     if any(os.path.exists(f) for f in (train_output_file, val_output_file, meta_output_file)) and not overwrite_output:
-        logger.error(
-            f'The output files "{train_output_file}", "{val_output_file}", "{meta_output_file}" already exists, aborting ...'
-        )
+        logger.error(f'The output files "{train_output_file}", "{val_output_file}", "{meta_output_file}" already exists, aborting ...')
         return
 
     # Create the output directory if necessary
@@ -330,31 +326,47 @@ def process_hh_rlhf_dataset(
 
     working_files = find_certain_files_under_dir(src_dir, '.jsonl.gz')
 
-    num_files = len(working_files)
+    # only include training samples from hh-rlhf 'helpful'
+    working_files = [f for f in working_files if 'helpful' in f]
+    train_files = [f for f in working_files if 'train' in f]
+    val_files = [f for f in working_files if 'test' in f]
 
-    if num_files == 0:
-        logger.warning('Found no .jsonl.gz file')
-        return
+    def _build_dataset_from_files(files, num_workers):
+        num_files = len(files)
 
-    if num_files < num_workers:
-        num_workers = num_files
+        if num_files == 0:
+            logger.warning('Found no .jsonl.gz file')
+            return
 
-    logger.info(f'Processing {num_files} .jsonl.gz files using {num_workers} workers ...')
+        if num_files < num_workers:
+            num_workers = num_files
 
-    process_file_func = functools.partial(
-        _process_single_hh_rlhf_jsonl_file,
-        max_seq_len=max_seq_length,
-        tokenizer=tokenizer,
-    )
+        logger.info(f'Processing {num_files} .jsonl.gz files using {num_workers} workers ...')
 
-    with mp.Pool(num_workers) as pool:
-        result_list = list(
-            tqdm.tqdm(pool.imap(process_file_func, working_files), total=len(working_files), desc='Processing files')
+        process_file_func = functools.partial(
+            _process_single_hh_rlhf_jsonl_file,
+            tokenizer=tokenizer,
+            max_seq_len=max_seq_length,
         )
 
-    datasets = []
-    for result in result_list:
-        datasets.extend(result)
+        with mp.Pool(num_workers) as pool:
+            result_list = list(tqdm.tqdm(pool.imap(process_file_func, files), total=len(files), desc='Processing files'))
+
+        data = []
+        for result in result_list:
+            data.extend(result)
+
+        return data
+
+    train_ds = _build_dataset_from_files(train_files, num_workers)
+    val_ds = _build_dataset_from_files(val_files, num_workers)
+
+    logger.info('Saving processed Human preference dataset ...')
+
+    for data, out_file in zip((train_ds, val_ds), (train_output_file, val_output_file)):
+        if len(data) > 0:
+            logger.info(f'Saving {len(data)} processed data to {out_file!r} ...')
+            pickle.dump(data, open(out_file, 'wb'))
 
     metadata['vocab_size'] = tokenizer.vocab_size
     metadata['data_structure'] = (
@@ -364,15 +376,10 @@ def process_hh_rlhf_dataset(
     metadata['min_responses'] = 2
     metadata['max_responses'] = 2
 
-    logger.info('Saving processed Human preference dataset ...')
-    _split_and_save_datasets(
-        datasets,
-        validation_ratio,
-        train_output_file,
-        val_output_file,
-        meta_output_file,
-        metadata,
-    )
+    logger.info(f'Saving metadata to {meta_output_file!r} ...')
+
+    with open(meta_output_file, 'w', encoding='utf-8') as f:
+        json.dump(metadata, f, indent=2, sort_keys=True)
 
 
 def process_stackexchange_dataset(
@@ -403,9 +410,7 @@ def process_stackexchange_dataset(
     meta_output_file = os.path.join(output_dir, 'meta.json')
 
     if any(os.path.exists(f) for f in (train_output_file, val_output_file, meta_output_file)) and not overwrite_output:
-        logger.error(
-            f'The output files "{train_output_file}", "{val_output_file}", "{meta_output_file}" already exists, aborting ...'
-        )
+        logger.error(f'The output files "{train_output_file}", "{val_output_file}", "{meta_output_file}" already exists, aborting ...')
         return
 
     # Create the output directory if necessary
@@ -442,9 +447,7 @@ def process_stackexchange_dataset(
     )
 
     with mp.Pool(num_workers) as pool:
-        result_list = list(
-            tqdm.tqdm(pool.imap(process_file_func, working_files), total=len(working_files), desc='Processing files')
-        )
+        result_list = list(tqdm.tqdm(pool.imap(process_file_func, working_files), total=len(working_files), desc='Processing files'))
 
     datasets = []
     for result in result_list:

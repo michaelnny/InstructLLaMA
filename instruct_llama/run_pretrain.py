@@ -55,10 +55,10 @@ from instruct_llama.models.model import Transformer, TransformerBlock, ModelArgs
 from instruct_llama.models.tokenizer import Tokenizer
 
 from instruct_llama.configs.pretrain import config as cfg
-from instruct_llama.utils.custom_dataset import BlendedDataset
+from instruct_llama.core.custom_dataset import BlendedDataset
 
-from instruct_llama.utils.schedule import CosineDecayWithWarmupLRScheduler
-from instruct_llama.utils.train_helper import (
+from instruct_llama.core.schedule import CosineDecayWithWarmupLRScheduler
+from instruct_llama.core.train_helper import (
     create_trace_profiler,
     create_optimizer,
     compute_num_trainable_params,
@@ -172,13 +172,13 @@ def train_step(
     model: Transformer,
     batch: Tuple[torch.Tensor],
     scaler: ShardedGradScaler,
-    loss_scale: float,
+    gradient_accum_steps: int,
     local_rank: int,
     tracker: StatsTracker,
 ) -> None:
     """Run a single training step, where we do a forward + backward passes, but do no update parameters"""
 
-    assert loss_scale > 0
+    assert gradient_accum_steps >= 1
 
     x, y = batch
     x, y = (
@@ -190,7 +190,7 @@ def train_step(
     losses = compute_pretrain_loss(output, y)
     loss = losses.mean()
     # scale the loss to account for gradient accumulation
-    scaled_loss = loss * loss_scale
+    scaled_loss = loss / gradient_accum_steps
 
     if scaler is not None:  # when using float16
         scaler.scale(scaled_loss).backward()
@@ -257,7 +257,7 @@ def run_validation_steps(
         if val_pbar is not None:
             val_pbar.update(1)
 
-        if i >= steps:
+        if i + 1 >= steps:
             break
 
     if val_pbar is not None:
@@ -283,7 +283,6 @@ def init_weights(model: Transformer) -> None:
 def fsdp_main():
     assert cfg.train_batch_size >= 1
     assert cfg.gradient_accum_steps >= 1
-    assert 0 < cfg.loss_scale <= 1
     assert cfg.log_interval >= 1
     assert cfg.val_interval >= 0
     assert cfg.val_steps >= 1
@@ -438,9 +437,7 @@ def fsdp_main():
     train_tracker = StatsTracker(local_rank=local_rank, world_size=world_size)
     val_tracker = StatsTracker(local_rank=local_rank, world_size=world_size)
 
-    logger.info(
-        f'Starting to run {cfg.num_epochs} training epochs, total of {max_train_steps} steps, with batch size {batch_size}'
-    )
+    logger.info(f'Starting to run {cfg.num_epochs} training epochs, total of {max_train_steps} steps, with batch size {batch_size}')
 
     for epoch in range(1, cfg.num_epochs + 1):  # for each epoch
         logger.info(f'Start epoch {epoch}')
@@ -449,7 +446,7 @@ def fsdp_main():
         val_tracker.reset()
 
         for iter, batch in enumerate(train_loader):  # for each batch in current epoch
-            train_step(model, batch, scaler, cfg.loss_scale, local_rank, train_tracker)
+            train_step(model, batch, scaler, cfg.gradient_accum_steps, local_rank, train_tracker)
 
             if iter % cfg.gradient_accum_steps == 0:
                 grad_norm = get_grad_norm_fsdp(model, rank, world_size, cfg.sharding_strategy)
@@ -469,14 +466,10 @@ def fsdp_main():
 
                 # regular checkpointing
                 if cfg.ckpt_interval > 0 and (train_steps % cfg.ckpt_interval == 0 or train_steps == max_train_steps):
-                    create_fsdp_full_checkpoint(
-                        model, rank, os.path.join(cfg.ckpt_dir, f'{cfg.model_type}-steps-{train_steps}.pth')
-                    )
+                    create_fsdp_full_checkpoint(model, rank, os.path.join(cfg.ckpt_dir, f'{cfg.model_type}-steps-{train_steps}.pth'))
 
                 # validation steps
-                if cfg.val_steps > 0 and (
-                    cfg.val_interval > 0 and train_steps % cfg.val_interval == 0 or train_steps == max_train_steps
-                ):
+                if cfg.val_steps > 0 and (cfg.val_interval > 0 and train_steps % cfg.val_interval == 0 or train_steps == max_train_steps):
                     model.eval()
                     run_validation_steps(model, val_loader, cfg.val_steps, rank, local_rank, val_tracker)
                     model.train()
@@ -487,7 +480,7 @@ def fsdp_main():
                     # save best model
                     if val_stats['accuracy'] > best_val_accuracy:
                         best_val_accuracy = val_stats['accuracy']
-                        logger.info(f'New best validation accuracy: {val_stats["accuracy"]:.2f}')
+                        logger.info(f'New best validation accuracy: {val_stats["accuracy"]:.4f}')
                         create_fsdp_full_checkpoint(model, rank, os.path.join(cfg.ckpt_dir, f'{cfg.model_type}-best.pth'))
 
     # show some training stats.

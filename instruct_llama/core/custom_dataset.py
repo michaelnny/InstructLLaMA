@@ -155,11 +155,7 @@ class BlendedDataset(IterableDataset):
 
                 assert start_idx >= 0 and end_idx - start_idx > self.max_seq_len
 
-            start_indices = [
-                i
-                for i in range(0, end_idx - self.max_seq_len, self.max_seq_len)
-                if i * self.max_seq_len + self.max_seq_len < end_idx
-            ]
+            start_indices = [i for i in range(0, end_idx - self.max_seq_len, self.max_seq_len) if i * self.max_seq_len + self.max_seq_len < end_idx]
             self.shard_indices.append(start_indices)
 
     def generator(self):
@@ -232,8 +228,9 @@ class FineTuneDataset(Dataset):
                 if seq_length <= self.max_seq_len:
                     self.data.append((x, y))
 
+        random.shuffle(self.data)
+
         if self.max_samples > 0 and len(self.data) > self.max_samples:
-            random.shuffle(self.data)
             self.data = self.data[: self.max_samples]
 
         seq_length_stats = []  # track statistics
@@ -308,8 +305,8 @@ class ComparisonsDataset(Dataset):
 
                 self.data.append(tokens_list)
 
+        random.shuffle(self.data)
         if self.max_samples > 0 and len(self.data) > self.max_samples:
-            random.shuffle(self.data)
             self.data = self.data[: self.max_samples]
 
         # track some statistics
@@ -337,8 +334,8 @@ class ComparisonsDataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, idx):
-        items = self.data[idx]
-        return items
+        item = self.data[idx]
+        return item
 
     def get_metadata(self):
         return {
@@ -350,7 +347,7 @@ class ComparisonsDataset(Dataset):
 
 
 class PromptOnlyDataset(Dataset):
-    """A simple dataset contains prompt only tokens for RL. Where we can sample a batch of prompts uniformly."""
+    """A simple dataset contains prompt only tokens for RL."""
 
     def __init__(
         self,
@@ -358,7 +355,7 @@ class PromptOnlyDataset(Dataset):
         min_seq_len: int = 6,
         max_seq_len: int = 2048,
         max_samples: int = 0,
-        seed: int = 1,
+        shuffle: bool = True,
     ) -> None:
         """
         Args:
@@ -366,6 +363,7 @@ class PromptOnlyDataset(Dataset):
             min_seq_len: prompt_tokens length lesser than this will be discarded.
             max_seq_len: prompt_tokens length greater than this will be discarded.
             max_samples: maximum number of samples to include, default 0 no limit.
+            shuffle: shuffle at each new epoch.
         """
 
         assert len(data_sources) > 0
@@ -378,9 +376,7 @@ class PromptOnlyDataset(Dataset):
         self.min_seq_len = min_seq_len
         self.max_seq_len = max_seq_len
         self.max_samples = max_samples
-
-        self.random_state = np.random.RandomState(seed)
-
+        self.shuffle = shuffle
         self.data = []
 
         # Load datasets
@@ -392,8 +388,10 @@ class PromptOnlyDataset(Dataset):
                 if seq_length >= self.min_seq_len and seq_length <= self.max_seq_len:
                     self.data.append(x)
 
-        if self.max_samples > 0 and len(self.data) > self.max_samples:
+        if self.shuffle:
             random.shuffle(self.data)
+
+        if self.max_samples > 0 and len(self.data) > self.max_samples:
             self.data = self.data[: self.max_samples]
 
         seq_length_stats = []  # track statistics
@@ -411,14 +409,28 @@ class PromptOnlyDataset(Dataset):
         }
 
         self.num_samples = len(self.data)
+        self.last_idx = 0
 
     def __len__(self):
         return len(self.data)
 
     def sample(self, size: int = 1) -> List[List[int]]:
-        """Sample a batch uniformly"""
-        indices = self.random_state.randint(low=0, high=self.num_samples, size=size)
-        return [self.data[i] for i in indices]
+        """Sample a batch of prompts sequentially"""
+
+        # This will ensures that we don't get duplicates in the same epoch, as long as the original dataset does not contain duplicates
+        # however, this will drop last few items at the end of epoch
+        start_idx = self.last_idx
+        if start_idx + size > self.num_samples:
+            start_idx = 0
+            if self.shuffle:
+                random.shuffle(self.data)  # shuffle dataset on each epoch
+
+        end_idx = start_idx + size
+        assert end_idx <= self.num_samples
+        items = [self.data[i] for i in range(start_idx, end_idx)]
+        assert len(items) == size
+        self.last_idx = end_idx
+        return items
 
     def get_metadata(self):
         return {

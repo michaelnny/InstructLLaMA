@@ -30,9 +30,9 @@ from instruct_llama.models.tokenizer import Tokenizer
 from instruct_llama.models.lora import mark_only_lora_as_trainable
 
 from instruct_llama.configs.sft_lora import config as cfg
-from instruct_llama.utils.custom_dataset import FineTuneDataset
-from instruct_llama.utils.schedule import CosineDecayWithWarmupLRScheduler
-from instruct_llama.utils.train_helper import (
+from instruct_llama.core.custom_dataset import FineTuneDataset
+from instruct_llama.core.schedule import CosineDecayWithWarmupLRScheduler
+from instruct_llama.core.train_helper import (
     create_trace_profiler,
     create_optimizer,
     compute_num_trainable_params,
@@ -96,12 +96,12 @@ def train_step(
     model: Transformer,
     batch: Tuple[torch.Tensor],
     scaler: torch.cuda.amp.GradScaler,
-    loss_scale: float,
+    gradient_accum_steps: int,
     tracker: StatsTracker,
 ) -> None:
     """Run a single training step, where we do a forward + backward passes, but do no update parameters"""
 
-    assert loss_scale > 0
+    assert gradient_accum_steps >= 1
 
     x, y, loss_mask = batch
     x, y, loss_mask = (
@@ -115,7 +115,7 @@ def train_step(
     losses = compute_finetune_loss(output, y, loss_mask)  # [batch_size]
     loss = losses.mean()
     # scale the loss to account for gradient accumulation
-    scaled_loss = loss * loss_scale
+    scaled_loss = loss / gradient_accum_steps
 
     if scaler is not None:  # when using float16
         scaler.scale(scaled_loss).backward()
@@ -176,7 +176,7 @@ def run_validation_steps(
 
         val_pbar.update(1)
 
-        if i >= steps:
+        if i + 1 >= steps:
             break
 
     val_pbar.close()
@@ -226,7 +226,6 @@ def main():
     assert cfg.num_epochs >= 1
     assert cfg.train_batch_size >= 1
     assert cfg.gradient_accum_steps >= 1
-    assert 0 < cfg.loss_scale <= 1
     assert cfg.log_interval >= 1
     assert cfg.val_interval >= 0
     assert cfg.val_steps >= 1
@@ -236,6 +235,9 @@ def main():
 
     if not os.path.exists(cfg.pretrain_ckpt_file):
         raise ValueError(f'Invalid pretrained checkpoint {cfg.pretrain_ckpt_file!r}, aborting ...')
+
+    if cfg.lora_head and 'lm_head' in cfg.additional_layers:
+        raise ValueError(f'Conflict option of `lora_head=true` and {cfg.additional_layers}, aborting ...')
 
     # --------------- Load datasets ---------------
 
@@ -306,6 +308,7 @@ def main():
         lora_attn_value=cfg.lora_attn_value,
         lora_attn_proj=cfg.lora_attn_proj,
         lora_attn_mlp=cfg.lora_attn_mlp,
+        lora_head=cfg.lora_head,
         # Quantization configurations
         quant_4bit=cfg.quant_4bit,
         quant_lora_4bit=cfg.quant_lora_4bit,
@@ -338,12 +341,14 @@ def main():
         else:
             module = module.to(dtype=compute_dtype)
 
-    mark_only_lora_as_trainable(model, train_bias=cfg.train_bias, train_head=cfg.train_head)
+    mark_only_lora_as_trainable(model, train_bias=cfg.train_bias)
 
     # This is where the weights quantization happens
     # when we move the model to cuda, the bnb.nn.Params4bit.cuda() method is called,
     # and the weights is quantized using bnb.functional.quantize_4bit
     model = model.to('cuda')
+
+    torch.cuda.empty_cache()
 
     logger.info('Initializing optimizer ...')
 
@@ -372,7 +377,7 @@ def main():
 
     # --------------- Start Training ---------------
 
-    create_ckpt_func = functools.partial(create_lora_checkpoint, train_bias=cfg.train_bias, train_head=cfg.train_head)
+    create_ckpt_func = functools.partial(create_lora_checkpoint, train_bias=cfg.train_bias)
 
     torch_profiler = None
     tb_writer = SummaryWriter(os.path.join(cfg.log_dir, cfg.model_type))
@@ -390,9 +395,7 @@ def main():
     train_tracker = StatsTracker()
     val_tracker = StatsTracker()
 
-    logger.info(
-        f'Starting to run {cfg.num_epochs} training epochs, total of {max_train_steps} steps, with batch size {batch_size}'
-    )
+    logger.info(f'Starting to run {cfg.num_epochs} training epochs, total of {max_train_steps} steps, with batch size {batch_size}')
 
     for epoch in range(1, cfg.num_epochs + 1):  # for each epoch
         logger.info(f'Start epoch {epoch}')
@@ -401,7 +404,7 @@ def main():
         val_tracker.reset()
 
         for iter, batch in enumerate(train_loader):  # for each batch in current epoch
-            train_step(model, batch, scaler, cfg.loss_scale, train_tracker)
+            train_step(model, batch, scaler, cfg.gradient_accum_steps, train_tracker)
 
             if iter % cfg.gradient_accum_steps == 0:
                 grad_norm = get_grad_norm_local(model)
@@ -421,14 +424,10 @@ def main():
 
                 # regular checkpointing
                 if cfg.ckpt_interval > 0 and (train_steps % cfg.ckpt_interval == 0 or train_steps == max_train_steps):
-                    create_ckpt_func(
-                        model=model, full_path=os.path.join(cfg.ckpt_dir, f'lora_{cfg.model_type}-steps-{train_steps}.pth')
-                    )
+                    create_ckpt_func(model=model, full_path=os.path.join(cfg.ckpt_dir, f'lora_{cfg.model_type}-steps-{train_steps}.pth'))
 
                 # validation steps
-                if cfg.val_steps > 0 and (
-                    cfg.val_interval > 0 and train_steps % cfg.val_interval == 0 or train_steps == max_train_steps
-                ):
+                if cfg.val_steps > 0 and (cfg.val_interval > 0 and train_steps % cfg.val_interval == 0 or train_steps == max_train_steps):
                     model.eval()
                     run_validation_steps(model, val_loader, cfg.val_steps, val_tracker)
                     model.train()
@@ -439,8 +438,11 @@ def main():
                     # save best model
                     if val_stats['accuracy'] > best_val_accuracy:
                         best_val_accuracy = val_stats['accuracy']
-                        logger.info(f'New best validation accuracy: {val_stats["accuracy"]:.2f}%')
+                        logger.info(f'New best validation accuracy: {val_stats["accuracy"]:.4f}')
                         create_ckpt_func(model=model, full_path=os.path.join(cfg.ckpt_dir, f'lora_{cfg.model_type}-best.pth'))
+
+    # create a final checkpoint
+    create_ckpt_func(model=model, full_path=os.path.join(cfg.ckpt_dir, f'lora_{cfg.model_type}-steps-{train_steps}.pth'))
 
     # show some training stats.
     logger.info(f'CUDA Memory Summary After Last training:\n{torch.cuda.memory_summary()}')

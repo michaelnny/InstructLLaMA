@@ -18,7 +18,7 @@ from instruct_llama.core.custom_dataset import DataSource
 
 @dataclass
 class config:
-    """Trains policy and value networks using PPO (RL) with LoRA"""
+    """Trains policy and value networks using PPO (RL)"""
 
     # model type definition, the details (number of layers, heads etc.) are defined in model.py
     policy_model_type: str = '7B'  # 7B, 13B, 70B
@@ -43,8 +43,8 @@ class config:
     )
 
     dataloader_workers: int = 1
-    max_train_samples: int = 50000  # set sample limit in the prompt dataset for a quick test run, 0 means no limit
-    max_val_samples: int = 5000
+    max_train_samples: int = 20000  # set sample limit in the prompt dataset for a quick test run, 0 means no limit
+    max_val_samples: int = 2000
     min_prompt_len: int = 16  # limit the minimum length of prompts in the prompt dataset
     max_prompt_len: int = 200  # limit the maximum length of prompts in the prompt dataset
 
@@ -95,12 +95,12 @@ class config:
     #         metadata_file='./datasets/red_pajama_mini/train_meta.json',
     #     ),
     # )
-    scale_kl: bool = True  # remove negative KL and scale into [0, 1]
+    scale_kl: bool = False  # remove negative KL and scale into [0, 1] before adding as penalties to reward
     # adaptive KL
     init_kl_coef: float = 0.05  # coefficient for per-token KL penalties
     adaptive_kl: bool = True
     kl_target: float = 6.0  # KL target estimate is summed up over a single episode then averaged over batch
-    adaptive_kl_horizon: int = 5000  # 10000 # number of selfplay episodes
+    adaptive_kl_horizon: int = 10000  # number of selfplay episodes
     whiten_rewards: bool = False  # normalize combined reward (env_reward + KL penalties) before compute GAE advantages
 
     # looking for the first occurrence of truncate token text like '[INST]' in the response, so we may add penalty reward to the sequence
@@ -112,61 +112,28 @@ class config:
     val_rollout_size: int = 128
     ckpt_interval: int = 20  # N epochs, which is around N x train_rollout_size episodes
 
-    # LoRA configuration for PPO policy model
-    policy_lora_r: int = 128
-    policy_lora_scaling: float = 1.0  # set the LoRA scaling, by default 1.0 no scaling
-    policy_lora_dropout: float = 0.0
-    # LoRA trainable layers
-    policy_lora_attn_query: bool = True  # train Attention query layer
-    policy_lora_attn_key: bool = False  # train Attention key layer
-    policy_lora_attn_value: bool = True  # train Attention value layer
-    policy_lora_attn_proj: bool = False  # train Attention projection layer
-    policy_lora_attn_mlp: bool = False  # train Attention MLP block
-    policy_lora_head: bool = False  # train model output layer
-    policy_train_bias: str = 'none'  # none, lora_only, all
-    # Quantization
-    policy_quant_4bit: bool = False  # quantize frozen linear layer
-    policy_quant_lora_4bit: bool = False  # quantize LoRA linear layer
-    policy_quant_4bit_double: bool = False  # double quantize
-    policy_quant_4bit_type: str = 'nf4'  # only supports 'fp4' or 'nf4'
-
-    # LoRA configuration for PPO value model
-    value_lora_r: int = 128
-    value_lora_scaling: float = 1.0  # set the LoRA scaling, by default 1.0 no scaling
-    value_lora_dropout: float = 0.0
-    # LoRA trainable layers
-    value_lora_attn_query: bool = True  # train Attention query layer
-    value_lora_attn_key: bool = False  # train Attention key layer
-    value_lora_attn_value: bool = True  # train Attention value layer
-    value_lora_attn_proj: bool = False  # train Attention projection layer
-    value_lora_attn_mlp: bool = False  # train Attention MLP block
-    value_lora_head: bool = True  # train model output layer
-    value_train_bias: str = 'all'  # none, lora_only, all
-    # Quantization
-    value_quant_4bit: bool = False  # quantize frozen linear layer
-    value_quant_lora_4bit: bool = False  # quantize LoRA linear layer
-    value_quant_4bit_double: bool = False  # double quantize
-    value_quant_4bit_type: str = 'nf4'  # only supports 'fp4' or 'nf4'
+    # frozen the first N decoder layers and make the last M-N decoder layers along with the output layer fully-trainable
+    policy_frozen_layers: int = 26
+    value_frozen_layers: int = 10
 
     # AdamW optimizer
-    use_paged_adamw: bool = False
     weight_decay: float = 0.0
     adam_betas: Tuple = (0.9, 0.95)
     adam_eps: float = 1e-5
     adam_fused: bool = False
 
     # PPO policy model learning rate, should use smaller lr if also train lm head since we don't apply LoRA to the head layer
-    policy_init_lr: float = 1.2e-6  # initial learning rate
-    policy_max_lr: float = 1.2e-5  # max learning rate after warm up
-    policy_min_lr: float = 1.2e-5  # min learning rate after decay
-    policy_lr_warmup_steps: int = 100
-    policy_grad_clip: float = 1.0
+    policy_init_lr: float = 4.5e-6  # initial learning rate
+    policy_max_lr: float = 4.5e-6  # max learning rate after warm up
+    policy_min_lr: float = 4.5e-6  # min learning rate after decay
+    policy_lr_warmup_steps: int = 0
+    policy_grad_clip: float = 5.0
 
     # PPO value model learning rate, should use smaller lr if also train scalar head since we don't apply LoRA to the head layer
-    value_init_lr: float = 1.2e-6  # initial learning rate
-    value_max_lr: float = 1.2e-5  # max learning rate after warm up
-    value_min_lr: float = 1.2e-5  # min learning rate after decay
-    value_lr_warmup_steps: int = 100
+    value_init_lr: float = 9e-6  # initial learning rate
+    value_max_lr: float = 9e-6  # max learning rate after warm up
+    value_min_lr: float = 9e-6  # min learning rate after decay
+    value_lr_warmup_steps: int = 0
     value_grad_clip: float = 10.0
 
     # dropout regularization
@@ -177,5 +144,5 @@ class config:
 
     # others
     seed: int = 152
-    log_dir: str = './logs/rlhf_lora'
-    ckpt_dir: str = './checkpoints/rlhf_lora'
+    log_dir: str = './logs/rlhf'
+    ckpt_dir: str = './checkpoints/rlhf'

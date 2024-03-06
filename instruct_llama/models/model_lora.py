@@ -34,6 +34,7 @@ class LoraModelArgs(llama.ModelArgs):
     lora_attn_value: bool = False  # train Attention value layer
     lora_attn_proj: bool = False  # train Attention output projection layer
     lora_attn_mlp: bool = False  # train Attention MLP block
+    lora_head: bool = False  # train model output layer
 
     quant_4bit: bool = False  # quantize frozen linear layer
     quant_lora_4bit: bool = False  # quantize LoRA linear layer
@@ -82,9 +83,7 @@ def _get_linear_layer(params: LoraModelArgs) -> Union[nn.Linear, Linear4bit]:
     return partial(layer_cls, **kwargs)
 
 
-def get_linear_layer(
-    params: LoraModelArgs, use_lora: bool = False
-) -> Union[nn.Linear, Linear4bit, LoRALinear, LoRALinear4bit]:
+def get_linear_layer(params: LoraModelArgs, use_lora: bool = False) -> Union[nn.Linear, Linear4bit, LoRALinear, LoRALinear4bit]:
     if use_lora:
         return _get_lora_linear_layer(params)
     else:
@@ -199,16 +198,16 @@ class Transformer(llama.Transformer):
 
         self.post_norm = llama.RMSNorm(params.dim, eps=params.norm_eps)
 
-        # do not apply LoRA or quantize to the lm_head or scalar_head layer
+        head_layer_cls = get_linear_layer(params, params.lora_head)
         if self.params.head_type == 'lm_head':
             logger.info('Creating LLaMA-2 model with LM head ...')
-            self.lm_head = nn.Linear(params.dim, params.vocab_size, bias=False)
+            self.lm_head = head_layer_cls(params.dim, params.vocab_size, bias=False)
         elif self.params.head_type == 'scalar_head':
             logger.info('Creating LLaMA-2 model with scalar head ...')
-            self.scalar_head = nn.Linear(params.dim, 1, bias=True)
+            self.scalar_head = head_layer_cls(params.dim, 1, bias=True)
         elif self.params.head_type == 'dual_head':  # policy model with an additional value head
             logger.info('Creating LLaMA-2 model with LM and scalar heads ...')
-            self.lm_head = nn.Linear(params.dim, params.vocab_size, bias=False)
-            self.scalar_head = nn.Linear(params.dim, 1, bias=True)
+            self.lm_head = head_layer_cls(params.dim, params.vocab_size, bias=False)
+            self.scalar_head = head_layer_cls(params.dim, 1, bias=True)
 
         self.freqs_cis = llama.precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.max_seq_len * 2)

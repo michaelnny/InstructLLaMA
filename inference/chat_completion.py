@@ -16,7 +16,7 @@ wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 
 
-from instruct_llama.generation import Llama
+from instruct_llama.core.generation import Llama
 
 
 def main(
@@ -117,8 +117,8 @@ These are just a few of the many attractions that Paris has to offer. With so mu
 
 if __name__ == '__main__':
     main(
-        # ckpt_path="/home/michael/models/meta_llama2/llama-2-7b-chat/consolidated.pth",  # Meta fine-tuned chat model
-        # ckpt_path='./checkpoints/7b-sft/steps-2200-merged.pth',  # our fine-tuned chat model
-        ckpt_path='./checkpoints/7b-rlhf/epoch-60-merged.pth',  # our RLHF trained chat model
+        # ckpt_path="/home/michael/models/meta_llama2/llama-2-7b-chat/consolidated.pth",  # Meta chat model
+        # ckpt_path='./checkpoints/merged/7B-sft-steps-6000.pth',  # our fine-tuned chat model
+        ckpt_path='./checkpoints/rlhf/policy/7B-epoch-40.pth',  # our RLHF trained chat model
         tokenizer_path='/home/michael/models/meta_llama2/tokenizer.model',
     )

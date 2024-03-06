@@ -1,8 +1,13 @@
+# Copyright (c) 2023 Michael Hu.
+# This project is released under the MIT License.
+# See the accompanying LICENSE file for details.
+
+
 import os
 import json
 import torch
 import logging
-from typing import Union
+from typing import Optional, Tuple
 
 from instruct_llama.models.model import Transformer
 from instruct_llama.models.lora import lora_state_dict
@@ -37,10 +42,10 @@ def create_checkpoint(model: Transformer, full_path: str) -> None:
     _save_model_meta(model, os.path.dirname(full_path))
 
 
-def create_lora_checkpoint(model: Transformer, full_path: str, train_bias, train_head) -> None:
+def create_lora_checkpoint(model: Transformer, full_path: str, train_bias: bool, additional_layers: Optional[Tuple[str]] = None) -> None:
     _check_file_path(full_path)
 
-    ckpt_state = lora_state_dict(model, train_bias=train_bias, train_head=train_head)
+    ckpt_state = lora_state_dict(model, train_bias=train_bias, additional_layers=additional_layers)
     torch.save(ckpt_state, full_path)
     logger.info(f'LoRA model checkpoint saved at {full_path!r}')
 

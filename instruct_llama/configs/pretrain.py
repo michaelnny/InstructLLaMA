@@ -17,7 +17,7 @@ import sys
 wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 
-from instruct_llama.utils.custom_dataset import DataSource
+from instruct_llama.core.custom_dataset import DataSource
 
 
 @dataclass
@@ -55,7 +55,6 @@ class config:
     # accumulate gradients so for each iteration, the actual batch size is = train_batch_size x gradient_accum_steps
     train_batch_size: int = 4
     gradient_accum_steps: int = 8
-    loss_scale: float = 1.0  # scale loss to account for gradient accumulation, we don't want to use a very small scale
     val_interval: int = 1000
     val_batch_size: int = 30
     val_steps: int = 20
@@ -70,7 +69,7 @@ class config:
 
     # AdamW optimizer
     weight_decay: float = 0.01
-    adam_betas: Tuple = (0.9, 0.95)
+    adam_betas: Tuple = (0.9, 0.999)
     adam_eps: float = 1e-5
     adam_fused: bool = True
     grad_clip: float = 1.0
@@ -95,6 +94,6 @@ class config:
 
     # others
     seed: int = 113
-    log_dir: str = './logs/pretrain'  # save logs and traces
+    log_dir: str = './logs/pretrain'
     ckpt_dir: str = './checkpoints/pretrain'
     use_profiler: bool = False  # use torch profiler to monitoring traces, be careful as the logs will grow very fast

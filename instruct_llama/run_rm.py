@@ -3,7 +3,9 @@
 # See the accompanying LICENSE file for details.
 
 
-"""Train reward model (RM) using QLoRA, starting from a fine-tuned model."""
+"""Train reward model (RM) full-scale, starting from a fine-tuned model.
+with the option to frozen first N decoder layers in the model.
+"""
 import os
 import functools
 from typing import List, Tuple, Mapping, Text, Any
@@ -26,14 +28,13 @@ wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 
 
-from instruct_llama.models.model_lora import Transformer, LoraModelArgs
+from instruct_llama.models.model import Transformer, ModelArgs
 from instruct_llama.models.tokenizer import Tokenizer
-from instruct_llama.models.lora import mark_only_lora_as_trainable
-
-from instruct_llama.configs.rm_lora import config as cfg
-from instruct_llama.utils.custom_dataset import ComparisonsDataset
-from instruct_llama.utils.schedule import CosineDecayWithWarmupLRScheduler
-from instruct_llama.utils.train_helper import (
+from instruct_llama.configs.rm import config as cfg
+from instruct_llama.core.custom_dataset import ComparisonsDataset
+from instruct_llama.core.schedule import CosineDecayWithWarmupLRScheduler
+from instruct_llama.core.train_helper import (
+    make_model_layer_trainable,
     create_trace_profiler,
     create_optimizer,
     compute_num_trainable_params,
@@ -41,23 +42,10 @@ from instruct_llama.utils.train_helper import (
 )
 from instruct_llama.utils.logger import create_logger, log_statistics
 from instruct_llama.utils.tracker import RMStatsTracker
-from instruct_llama.utils.checkpoint import create_lora_checkpoint, create_normalizer_checkpoint
-from instruct_llama.utils.normalizer import Normalizer
+from instruct_llama.utils.checkpoint import create_checkpoint
 
 
 logger = create_logger()
-
-
-def create_checkpoint(model, norm, step, is_best=False):
-    if is_best:
-        lora_full_path = os.path.join(cfg.ckpt_dir, f'lora_{cfg.model_type}-best.pth')
-        norm_full_path = os.path.join(cfg.ckpt_dir, f'normalizer_{cfg.model_type}-best.pth')
-    else:
-        lora_full_path = os.path.join(cfg.ckpt_dir, f'lora_{cfg.model_type}-steps-{step}.pth')
-        norm_full_path = os.path.join(cfg.ckpt_dir, f'normalizer_{cfg.model_type}-steps-{step}.pth')
-
-    create_lora_checkpoint(model, lora_full_path, cfg.train_bias, cfg.train_head)
-    create_normalizer_checkpoint(norm, norm_full_path)
 
 
 def clear_gpu_cache(rank=None):
@@ -166,11 +154,11 @@ def train_step(
     model: Transformer,
     batch: Tuple[torch.Tensor],
     scaler: torch.cuda.amp.GradScaler,
-    loss_scale: float,
+    gradient_accum_steps: int,
     tracker: RMStatsTracker,
 ) -> None:
     """Run a single training step, where we do a forward + backward passes, but do no update parameters"""
-    assert loss_scale > 0
+    assert gradient_accum_steps >= 1
 
     batch_tokens, terminal_steps, group_indices = batch
     batch_tokens = batch_tokens.to('cuda', non_blocking=True)
@@ -186,7 +174,7 @@ def train_step(
     losses = compute_batch_rm_comparison_loss(rewards, group_indices)
     loss = losses.mean()
     # scale the loss to account for gradient accumulation
-    scaled_loss = loss * loss_scale
+    scaled_loss = loss / gradient_accum_steps
 
     if scaler is not None:  # when using float16
         scaler.scale(scaled_loss).backward()
@@ -228,7 +216,6 @@ def run_validation_steps(
     loader: DataLoader,
     steps: int,
     tracker: RMStatsTracker,
-    reward_normalizer: Normalizer = None,
 ) -> None:
     """Run M validation steps"""
 
@@ -249,9 +236,6 @@ def run_validation_steps(
         # get rewards for terminal step, where sequence ends with EOS token, or reached maximum seq_length
         rewards = torch.gather(outputs, dim=1, index=terminal_steps.unsqueeze(-1)).squeeze(1)  # [num_combinations]
 
-        if reward_normalizer is not None:
-            reward_normalizer.update(rewards)
-
         # compute loss in a single go
         if tracker is not None:
             losses = compute_batch_rm_comparison_loss(rewards, group_indices)
@@ -260,7 +244,7 @@ def run_validation_steps(
 
         val_pbar.update(1)
 
-        if i >= steps:
+        if i + 1 >= steps:
             break
 
     val_pbar.close()
@@ -305,7 +289,7 @@ def custom_collate_fn(batch, pad_id: int, max_seq_len: int, full_pad: bool = Fal
         seq_len = len(seq)
 
         batch_sequences[i, :seq_len] = seq
-        terminal_steps[i] = seq_len - 1  # minus 1 because indexing starts from zero
+        terminal_steps[i] = seq_len - 1  # minus 1 because indexing starts from zero, maybe should also exclude the EOS token???
 
     return batch_sequences, terminal_steps, groups_indices
 
@@ -323,16 +307,16 @@ def init_head_weights(model: Transformer):
 def main():
     assert cfg.num_epochs >= 1
     assert cfg.gradient_accum_steps >= 1
-    assert 0 < cfg.loss_scale <= 1
     assert cfg.log_interval >= 1
     assert cfg.val_interval >= 0
     assert cfg.val_steps >= 1
+    assert cfg.frozen_layers >= 0
 
     if not torch.version.cuda:
         raise RuntimeError('This script requires Pytorch with CUDA.')
 
-    if not os.path.exists(cfg.rm_ckpt_file):
-        raise ValueError(f'Invalid model checkpoint "{cfg.rm_ckpt_file}", aborting ...')
+    if not os.path.exists(cfg.reward_ckpt_file):
+        raise ValueError(f'Invalid model checkpoint "{cfg.reward_ckpt_file}", aborting ...')
 
     # --------------- Load datasets ---------------
 
@@ -391,24 +375,8 @@ def main():
     else:
         logger.info('Training in float32 mode, make sure you have enough GPU RAM')
 
-    model_args = LoraModelArgs.from_model_type(
+    model_args = ModelArgs.from_model_type(
         model_type=cfg.model_type,
-        # LoRA configurations
-        lora_r=cfg.lora_r,
-        lora_scaling=cfg.lora_scaling,
-        lora_dropout=cfg.lora_dropout,
-        # LoRA trainable layers
-        lora_attn_query=cfg.lora_attn_query,
-        lora_attn_key=cfg.lora_attn_key,
-        lora_attn_value=cfg.lora_attn_value,
-        lora_attn_proj=cfg.lora_attn_proj,
-        lora_attn_mlp=cfg.lora_attn_mlp,
-        # Quantization configurations
-        quant_4bit=cfg.quant_4bit,
-        quant_lora_4bit=cfg.quant_lora_4bit,
-        quant_4bit_double=cfg.quant_4bit_double,
-        quant_4bit_type=cfg.quant_4bit_type,
-        quant_compute_dtype=compute_dtype,
         # Regular configurations
         head_type='scalar_head',
         vocab_size=tokenizer.vocab_size,
@@ -422,9 +390,9 @@ def main():
 
     # Load model checkpoint using strict=False,
     # because there's not scalar head weights in the checkpoint state
-    if os.path.exists(cfg.rm_ckpt_file):
-        logger.info(f'Loading RM checkpoint {cfg.rm_ckpt_file} ...')
-        model_state = torch.load(cfg.rm_ckpt_file)
+    if os.path.exists(cfg.reward_ckpt_file):
+        logger.info(f'Loading RM checkpoint {cfg.reward_ckpt_file} ...')
+        model_state = torch.load(cfg.reward_ckpt_file)
         model.load_state_dict(model_state, strict=False)
         del model_state
 
@@ -438,12 +406,17 @@ def main():
         else:
             module = module.to(dtype=compute_dtype)
 
-    mark_only_lora_as_trainable(model, train_bias=cfg.train_bias, train_head=cfg.train_head)
+    # freeze first N decoder layers and make last M-N decoder layers and output layer trainable
+    trainable_layers = ['post_norm', 'scalar_head']
+    for i in range(cfg.frozen_layers, model.n_layers):
+        trainable_layers.append(f'layers.{i}')
 
-    # This is where the weights quantization happens
-    # when we move the model to cuda, the bnb.nn.Params4bit.cuda() method is called,
-    # and the weights is quantized using bnb.functional.quantize_4bit
+    logger.info(f'Trainable layers:\n{trainable_layers}')
+    make_model_layer_trainable(model, trainable_layers)
+
     model = model.to('cuda')
+
+    torch.cuda.empty_cache()
 
     logger.info('Initializing optimizer ...')
 
@@ -472,8 +445,6 @@ def main():
 
     # --------------- Start Training ---------------
 
-    create_ckpt_func = functools.partial(create_lora_checkpoint, train_bias=cfg.train_bias, train_head=cfg.train_head)
-
     torch_profiler = None
     tb_writer = SummaryWriter(os.path.join(cfg.log_dir, cfg.model_type))
     train_pbar = tqdm.tqdm(range(max_train_steps), colour='blue', desc='Training steps')
@@ -490,9 +461,7 @@ def main():
     train_tracker = RMStatsTracker()
     val_tracker = RMStatsTracker()
 
-    logger.info(
-        f'Starting to run {cfg.num_epochs} training epochs, total of {max_train_steps} steps, with batch size {batch_size}'
-    )
+    logger.info(f'Starting to run {cfg.num_epochs} training epochs, total of {max_train_steps} steps, with batch size {batch_size}')
 
     for epoch in range(1, cfg.num_epochs + 1):  # for each epoch
         logger.info(f'Start epoch {epoch}')
@@ -501,7 +470,7 @@ def main():
         val_tracker.reset()
 
         for iter, batch in enumerate(train_loader):  # for each batch in current epoch
-            train_step(model, batch, scaler, cfg.loss_scale, train_tracker)
+            train_step(model, batch, scaler, cfg.gradient_accum_steps, train_tracker)
 
             if iter % cfg.gradient_accum_steps == 0:
                 grad_norm = get_grad_norm_local(model)
@@ -521,14 +490,10 @@ def main():
 
                 # regular checkpointing
                 if cfg.ckpt_interval > 0 and (train_steps % cfg.ckpt_interval == 0 or train_steps == max_train_steps):
-                    create_ckpt_func(
-                        model=model, full_path=os.path.join(cfg.ckpt_dir, f'lora_{cfg.model_type}-steps-{train_steps}.pth')
-                    )
+                    create_checkpoint(model=model, full_path=os.path.join(cfg.ckpt_dir, f'{cfg.model_type}-steps-{train_steps}.pth'))
 
                 # validation steps
-                if cfg.val_steps > 0 and (
-                    cfg.val_interval > 0 and train_steps % cfg.val_interval == 0 or train_steps == max_train_steps
-                ):
+                if cfg.val_steps > 0 and (cfg.val_interval > 0 and train_steps % cfg.val_interval == 0 or train_steps == max_train_steps):
                     model.eval()
                     run_validation_steps(model, val_loader, cfg.val_steps, val_tracker)
                     model.train()
@@ -539,31 +504,11 @@ def main():
                     # save best model
                     if val_stats['accuracy'] > best_val_accuracy:
                         best_val_accuracy = val_stats['accuracy']
-                        logger.info(f'New best validation accuracy: {val_stats["accuracy"]:.2f}')
-                        create_ckpt_func(model=model, full_path=os.path.join(cfg.ckpt_dir, f'lora_{cfg.model_type}-best.pth'))
+                        logger.info(f'New best validation accuracy: {val_stats["accuracy"]:.4f}')
+                        create_checkpoint(model=model, full_path=os.path.join(cfg.ckpt_dir, f'{cfg.model_type}-best.pth'))
 
-    # Training is done, run some steps to collect statistics for reward normalizer
-    if cfg.norm_samples > 0:
-        norm_kwargs = {'batch_size': cfg.norm_batch_size, 'sampler': None}
-        norm_kwargs.update(cuda_kwargs)
-        norm_loader = DataLoader(dataset=train_dataset, **norm_kwargs)
-        reward_normalizer = Normalizer()
-        num_norm_steps = cfg.norm_samples // cfg.norm_batch_size
-
-        logger.info(f'Run  {num_norm_steps} steps to collect statistics for reward normalizer...')
-
-        model.eval()
-        run_validation_steps(
-            model,
-            norm_loader,
-            num_norm_steps,
-            None,
-            reward_normalizer,
-        )
-
-        create_normalizer_checkpoint(
-            reward_normalizer, os.path.join(cfg.ckpt_dir, f'normalizer_{cfg.model_type}-steps-{train_steps}.pth')
-        )
+    # create a final checkpoint
+    create_checkpoint(model=model, full_path=os.path.join(cfg.ckpt_dir, f'{cfg.model_type}-steps-{train_steps}.pth'))
 
     # show some training stats.
     logger.info(f'CUDA Memory Summary After Last training:\n{torch.cuda.memory_summary()}')

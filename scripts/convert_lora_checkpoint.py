@@ -124,7 +124,7 @@ def merge_lora_checkpoint(
 
     meta_file = os.path.join(output_dir, 'params.json')
     if not os.path.exists(meta_file):
-        del_keys = ('lora', 'quant', 'dropout')
+        del_keys = ('lora', 'quant', 'dropout', 'use_cache', 'gradient_checkpointing')
         meta = model.params.dict()
         meta = {k: v for k, v in meta.items() if all([n not in k for n in del_keys])}
 
@@ -137,20 +137,13 @@ if __name__ == '__main__':
     # fine-tuned model
     merge_lora_checkpoint(
         base_ckpt_path='/home/michael/models/meta_llama2/llama-2-7b/consolidated.pth',
-        lora_ckpt_path='./checkpoints/sft_lora/lora_7B-steps-2200.pth',
-        save_path='./checkpoints/7b-sft/steps-2200-merged.pth',
-    )
-
-    # RM model
-    merge_lora_checkpoint(
-        base_ckpt_path='./checkpoints/7b-sft/steps-2200-merged.pth',
-        lora_ckpt_path='./checkpoints/rm_lora/lora_3B-steps-8000.pth',
-        save_path='./checkpoints/3b-rm/steps-8000-merged.pth',
+        lora_ckpt_path='./checkpoints/sft_lora/lora_7B-steps-6000.pth',
+        save_path='./checkpoints/sft/7B-steps-6000.pth',
     )
 
     # PPO models
     merge_lora_checkpoint(
-        base_ckpt_path='./checkpoints/7b-sft/steps-2200-merged.pth',
+        base_ckpt_path='./checkpoints/sft/7B-steps-6000.pth',
         lora_ckpt_path='./checkpoints/rlhf_lora/lora_7B-epoch-60.pth',
-        save_path='./checkpoints/7b-rlhf/epoch-60-merged.pth',
+        save_path='./checkpoints/rlhf/7B-epoch-60.pth',
     )

@@ -14,7 +14,7 @@ wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 
 
-from instruct_llama.generation import Llama
+from instruct_llama.core.generation import Llama
 
 
 def main(

@@ -3,7 +3,7 @@
 # See the accompanying LICENSE file for details.
 
 
-from typing import Tuple
+from typing import Tuple, Optional
 from dataclasses import dataclass
 
 
@@ -20,22 +20,22 @@ class config:
 
     # datasets
     train_datasources: Tuple[str] = (
-        './datasets/dolly/train.pkl',
         './datasets/alpaca/train.pkl',
-        './datasets/deepmind_mathematics/train.pkl',
-        './datasets/hh_rlhf_finetune/train.pkl',  # 160k
-        './datasets/stack_exchange_finetune/train.pkl',  # 300k
+        './datasets/hh_rlhf_finetune/train.pkl',  # 120k
+        # './datasets/stack_exchange_finetune/train.pkl',
+        # './datasets/dolly/train.pkl',
         # './datasets/squad/train.pkl',
         # './datasets/commonsense_dialogues/train.pkl',
+        # './datasets/deepmind_mathematics/train.pkl',
     )
     val_datasources: Tuple[str] = (
-        './datasets/dolly/validation.pkl',
         './datasets/alpaca/validation.pkl',
         './datasets/hh_rlhf_finetune/validation.pkl',
-        './datasets/stack_exchange_finetune/validation.pkl',
-        # './datasets/deepmind_mathematics/validation.pkl',
+        # './datasets/stack_exchange_finetune/validation.pkl',
+        # './datasets/dolly/validation.pkl',
         # './datasets/squad/validation.pkl',
         # './datasets/commonsense_dialogues/validation.pkl',
+        # './datasets/deepmind_mathematics/validation.pkl',
     )
     dataloader_workers: int = 1
 
@@ -47,9 +47,8 @@ class config:
     # training and validation loops
     num_epochs: int = 2
     # accumulate gradients so for each iteration, the actual batch size is = train_batch_size x gradient_accum_steps
-    train_batch_size: int = 2
-    gradient_accum_steps: int = 16
-    loss_scale: float = 1.0 / 8  # scale loss to account for gradient accumulation, we don't want to use a very small scale
+    train_batch_size: int = 3
+    gradient_accum_steps: int = 12
     val_interval: int = 500
     val_batch_size: int = 30
     val_steps: int = 20
@@ -59,7 +58,7 @@ class config:
     # LoRA configuration
     lora_r: int = 128
     lora_scaling: float = 1.0  # set the LoRA scaling, by default 1.0 no scaling
-    lora_dropout: float = 0.0
+    lora_dropout: float = 0.05
 
     # LoRA trainable layers
     lora_attn_query: bool = True  # train Attention query layer
@@ -67,9 +66,9 @@ class config:
     lora_attn_value: bool = True  # train Attention value layer
     lora_attn_proj: bool = False  # train Attention projection layer
     lora_attn_mlp: bool = False  # train Attention MLP block
+    lora_head: bool = False  # train model output layer
 
-    train_bias: str = 'all'  # none, lora_only, all
-    train_head: bool = True  # note we don't apply LoRA to model output head
+    train_bias: str = 'none'  # none, lora_only, all
 
     # Quantization
     quant_4bit: bool = True  # quantize frozen linear layer
@@ -77,33 +76,33 @@ class config:
     quant_4bit_double: bool = True  # double quantize
     quant_4bit_type: str = 'nf4'  # only supports 'fp4' or 'nf4'
 
-    # learning rate, maybe use smaller lr if also train head since we don't apply LoRA head layer
-    init_lr: float = 2.5e-6  # initial learning rate
-    max_lr: float = 2.5e-5  # max learning rate after warm up
-    min_lr: float = 2.5e-5  # min learning rate after decay
-    warmup_ratio: float = 0.03
+    # learning rate, should use smaller lr if also train lm head since we don't apply LoRA to the head layer
+    init_lr: float = 1e-5  # initial learning rate
+    max_lr: float = 1e-4  # max learning rate after warm up
+    min_lr: float = 1e-5  # min learning rate after decay
+    warmup_ratio: float = 0.02
 
     # prompt is less important than completion
-    prompt_loss_weight: float = 0.01
+    prompt_loss_weight: float = 0.0
     completion_loss_weight: float = 1.0
 
     # AdamW optimizer
     use_paged_adamw: bool = False
     weight_decay: float = 0.0
-    adam_betas: Tuple = (0.9, 0.95)
+    adam_betas: Tuple = (0.9, 0.999)
     adam_eps: float = 1e-5
     adam_fused: bool = True  # only applicable if not using bitsandbytes optimizer
-    grad_clip: float = 5.0
+    grad_clip: float = 1.0
 
     # dropout regularization
     embed_dropout: float = 0.0
-    attn_dropout: float = 0.1
+    attn_dropout: float = 0.0
 
     gradient_checkpointing: bool = False
     mixed_precision: bool = True  # default to BF16, but if no native GPU support detected, will use FP16.
 
     # others
     seed: int = 127
-    log_dir: str = './logs/sft_lora'  # save logs and traces
+    log_dir: str = './logs/sft_lora'
     ckpt_dir: str = './checkpoints/sft_lora'
     use_profiler: bool = False  # use torch profiler to monitoring traces, be careful as the logs will grow very fast

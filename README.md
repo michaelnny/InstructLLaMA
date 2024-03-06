@@ -4,16 +4,13 @@ Implements pre-training, supervised fine-tuning (SFT), and reinforcement learnin
 
 Check the [article post](https://www.vectortheta.com/blog/InstructLLaMA) on the discussion of the project.
 
-This project use a custom QLoRA implementation with basic tools such as PyTorch and Bitsandbytes, decoupled from any Hugging Face tools. For more information on QLoRA fine-tuning, check my [article post](https://www.vectortheta.com/blog/QLoRA-LLM) and project at
-[QLoRA-LLM](https://github.com/michaelnny/QLoRA-LLM)
-
 # Disclaimer
 
 **Project Purpose:** This project is dedicated to research and education, focusing on the study of individual algorithms rather than the creation of a standard library. If you're looking for a ready-to-use library for production applications, this project may not be suitable for your needs.
 
 **Bug Reporting and Contributions:** Although regular tests have been conducted, we cannot guarantee the code is bug-free. Bug reports and pull requests are highly encouraged and welcomed.
 
-**Optimization:** For simplicity, we only focus on training on a single GPU (except for pre-training script which support FSDP), as the PyTorch FSDP and QLoRA seems not working very well yet. Additionally, the hyper-parameters for the different training scripts are not fine-tuned.
+**Optimization:** For simplicity, we only focus on training on a single GPU (except for the pre-training script which support FSDP). Additionally, the hyper-parameters for the different training scripts are not fine-tuned.
 
 # Environment and Requirements
 
@@ -25,14 +22,17 @@ This project use a custom QLoRA implementation with basic tools such as PyTorch 
 # Code Structure
 
 - `instruct_llama` directory contains main source code for the project.
+
   - `configs` directory contains all the training configurations like model type, data source, number of iterations, learning rate etc.
-  - `utils` directory contains helper modules like custom datasets, logging, tokenization, LoRA module etc.
-  - `models` contains the LLaMA model class and LoRA layers.
-  - `run_pretrain.py` run pre-training (supports FSDP and multiple GPUs).
-  - `run_sft_lora.py` run supervised fine-tuning starting from Meta's pre-trained model, using LoRA parameter efficient fine-tuning method (only supports single GPU).
-  - `run_rm_lora.py` train reward model starting from supervised fine-tuning model, using LoRA parameter efficient fine-tuning method (only supports single GPU).
-  - `run_rlhf_lora.py` train policy and value models starting from supervised fine-tuning model and reward model respectively, all using LoRA parameter efficient fine-tuning method.
-  - `run_rlhf_lora_singlenet.py` basically same as `run_rlhf_lora.py`, but using a single policy network with a value head instead of two networks for PPO agent.
+  - `cores` directory contains core modules like custom datasets, RL PPO agent etc.
+  - `models` directory contains the LLaMA model class and LoRA layers.
+  - `utils` directory contains helper modules like logging, checkpointing etc.
+  - `run_pretrain.py` run pre-training starting from a random model (supports FSDP and multiple GPUs).
+  - `run_sft_lora.py` run supervised fine-tuning starting from pre-trained model, support 4-bit QLoRA (only supports single GPU).
+  - `run_rm.py` train reward model (full-scale) starting from supervised fine-tuning model (only supports single GPU).
+  - `run_rlhf.py` use RL PPO to train policy and value models, starting from supervised fine-tuning model and reward model respectively (supports allocate different models on different GPUs on a single machine, but no DDP or FSDP).
+  - `run_rlhf_lora.py` basically same as `run_rlhf.py`, but support 4-bit QLoRA (no DDP or FSDP).
+
 - `scripts` directory contains all source code for convert the model weights and build datasets for different phases.
   - `build_pretrain_datasets.py` build pre-train datasets (save the dataset in Numpy memmap structure), the dataset is optional during training using RLHF with PPO phase.
   - `build_finetune_datasets.py` build fine-tuning datasets (save the dataset to .pkl files).
@@ -72,57 +72,40 @@ python3 scripts/build_finetune_datasets.py
 
 ## Training Stages
 
-1. Run the `run_pretrain.py` script to train a LLaMA model from scratch. We only use it to train a 1B model so we can later use it as the reward model. Most of the time we would want to use Meta's pre-trained weights and skip this stage altogether.
-2. Run the `run_sft_lora.py` script to fine-tune the model, this requires a pre-trained model, such as the one from Meta or from above pretrain stage. Check and maintain the configuration inside `instruct_llama/configs/sft_lora.py` if necessary.
-3. Run the `run_rm_lora.py` script to train a reward model, this requires a fine-tuned model. Check and maintain the configuration inside `instruct_llama/configs/rm_lora.py` if necessary.
-4. Run the `run_rlhf_lora.py` script to train a policy model using RLHF and PPO, this requires a fine-tuned model and the reward model (frozen). Check and maintain the configuration inside `instruct_llama/configs/rlhf_lora.py` if necessary.
+1. Run the `run_pretrain.py` script to train a LLaMA model from scratch with full-scale training. We only use it to train a 1B model so we can later use it as the reward model. Most of the time we would want to use Meta's pre-trained weights and skip this stage altogether.
+2. Run the `run_sft_lora.py` script to fine-tune the model using 4-bit quantization and LoRA, this requires a pre-trained model, such as the one from Meta or from above pretrain stage. Check and maintain the configuration inside `instruct_llama/configs/sft_lora.py` if necessary.
+3. Run the `run_rm.py` script to train a reward model with full-scale training, this requires a fine-tuned model. Check and maintain the configuration inside `instruct_llama/configs/rm.py` if necessary.
+4. Run the `run_rlhf.py` script to train a policy model using RLHF and PPO with full-scale training, this requires a fine-tuned model and the reward model (frozen). Check and maintain the configuration inside `instruct_llama/configs/rlhf.py` if necessary.
 
-### QLoRA Options
+It's important to mention that the training prompts in RLHF stage must coming from the same data distribution as the samples used to train the reward model. Otherwise, the reward signal would be noise and the model will collapse. Ideally, the fine-tuning stage should also contain the same sample distribution, since we need the SFT model to compute KL penalties.
 
-The training settings are in `instruct_llama/configs`. These files lets us choose which layers to train and the quantization methods.
+# Stage 1 - Pre-training (full-scale)
 
-### LoRA parameters
+This stage is when we turn a randomly initialized model into a one that can predict the next token (often called language modeling), this is often the most time and resource consuming phase. This requires a large amount of tokens and GPU power. Most of the time we'd want to use ready-to-use pre-trained model weights, for example from Meta.
 
-We use a slightly modified LoRALayer class, where we set the scaling directly instead of using an alpha parameter, we found this more consistent and easy to maintain. Since in most case, using a scaling of 1 makes more sense.
-
-```
-lora_r: int = 64
-lora_scaling: float = 1.0  # set the LoRA scaling, by default 1.0 no scaling
-lora_dropout: float = 0.0
-```
-
-### Trainable layers
-
-For example, we can specify which layers in the model should be trainable using options like the ones below.
+It's important to mention, for pret-raining we can't use LoRA or QLoRA to reduce GPU resource. This is also the only stage (in this project) where we can utilize Pytorch FSDP and multiple GPUs to speed up training.
 
 ```
-lora_attn_query: bool = True  # train Attention query layer
-lora_attn_key: bool = False  # train Attention key layer
-lora_attn_value: bool = True  # train Attention value layer
-lora_attn_proj: bool = False  # train Attention projection layer
-lora_attn_mlp: bool = False  # train Attention MLP block
+torchrun --nproc_per_node 1 instruct_llama/run_pretrain.py
 ```
 
-One thing to mention is that we don't apply LoRA or quantization to the lm_head layer. This is because when initialize the scalar head for RM or PPO value networks, the weights for the final linear layer is often initialized randomly.
+# Stage 2 - Supervised Fine-Tuning (4-bit QLoRA)
 
-### Quantization layers
+This stage is when we turn a pre-trained language model from predicting next token to answer general questions, in a chat formation. This is also referred as the prompt completion, where the model is feed a prompt (user request), and it needs to generate the corresponding completion (answer).
 
-We have various quantization options. For instance, we can quantize only the frozen linear layers or both the frozen linear layers and trainable LoRA layers.
-
-When quantizing a LoRA layer, only the pre-trained weights are quantized, while the LoRA parameters remain unchanged.
-
-It's important to mention that our current support is limited to 4-bit quantization, and we utilize Bitsandbytes.
+Once we have a pre-trained model and the fine-tuning datasets are ready, we can start doing supervised fine-tuning using LoRA or QLoRA.
 
 ```
-quant_4bit: bool = True  # quantize frozen linear layer
-quant_lora_4bit: bool = True  # quantize LoRA linear layer
-quant_4bit_double: bool = True  # double quantize
-quant_4bit_type: str = 'nf4'  # only supports 'fp4' or 'nf4'
+python3 instruct_llama/run_sft_lora.py
 ```
+
+## QLoRA Options
+
+The training settings are in `instruct_llama/configs/sft_lora`. These files lets us choose which layers to train and the quantization methods. Note if using 4-bit quantized linear layers, the training speed will slow down 50%~70%, depending on the configurations.
 
 ## Merge LoRA weights
 
-Since we're using LoRA method, when the training is done (for each stage except pre-training), we need to merge the LoRA weights with the pre-trained or fine-tuned model weights. Which can be summarized into the following steps:
+Since we're using LoRA method, when the training is done, we need to merge the LoRA weights with the pre-trained or fine-tuned model weights. Which can be summarized into the following steps:
 
 1. Construct a model with LoRA layers, matching the configuration used in fine-tuning but without quantized layers.
 2. Load the pre-trained or fine-tuned weights.
@@ -137,51 +120,31 @@ You can use the following script to do the conversion, remember to update the fi
 python3 scripts/convert_lora_checkpoint.py
 ```
 
-# Stage 1 - Pre-training
+# Stage 3 - Train Reward Model (full-scale)
 
-This stage is when we turn a randomly initialized model into a one that can predict the next token (often called language modeling), this is often the most time and resource consuming phase. This requires a large amount of tokens and GPU power. Most of the time we'd want to use ready-to-use pre-trained model weights, for example from Meta.
-
-It's important to mention, for pret-raining we can't use LoRA or QLoRA to reduce GPU resource. This is also the only stage (in this project) where we can utilize Pytorch FSDP and multiple GPUs to speed up training.
-
-```
-torchrun --nproc_per_node 1 instruct_llama/run_pretrain.py
-```
-
-# Stage 2 - Supervised Fine-Tuning (SFT)
-
-This stage is when we turn a pre-trained language model from predicting next token to answer general questions, in a chat formation. This is also referred as the prompt completion, where the model is feed a prompt (user request), and it needs to generate the corresponding completion (answer).
-
-Once we have a pre-trained model and the fine-tuning datasets are ready, we can start doing supervised fine-tuning using LoRA or QLoRA.
-
-```
-python3 instruct_llama/run_sft_lora.py
-```
-
-Keep in mind we need to merge the LoRA weights after the training, refer to the instruction mentioned in **Merge LoRA weights** on how to do it.
-
-# Stage 3 - Train Reward Model (RM)
-
-After the fine-tuned phase is done, and the RM comparison datasets are ready, we can start training a reward model using using LoRA or QLoRA.
+After the fine-tuned phase is done, and the RM comparison datasets are ready, we can start training a reward model.
 
 Training the reward model involves using a comparison dataset, which has the following structure (a single sample):
 
 - a single prompt -> a list of 2 or more completions, where the best one is at index 0, and the worst one is the last in the list
 
-And the objective is train the model to assign a higher reward to the best completion and a lower reward to the worst one.
+And the objective is to train the model to assign a higher reward to the best (chosen) completion and a lower reward to the worser (rejected) ones.
 
-This training phase demands more GPU RAM compared to fine-tuning, as it involves maintaining multiple computation graphs/gradients during loss computation. To save computation, we use a smaller model with only 3 billion parameters. This model uses the first 12 transformer blocks from the fine-tuned 7B model, and the LM head is replaced with a linear layer that outputs a scalar score for the reward signal. This new scalar head is then jointly trained with the rest of LoRA/QLoRA layers.
+This training phase demands more GPU RAM compared to fine-tuning, as it involves maintaining multiple computation graphs/gradients during loss computation. To save computation, we use a smaller model with only 3 billion parameters. This model uses the first 16 transformer encoder layers from the fine-tuned 7B model, and the LM head is replaced with a linear layer that outputs a scalar score. This new scalar head is then jointly trained with the rest of decoder layers. To save computation, we have the option to freeze first N decoder layers.
+
+We don't use LoRA when train the reward model since the scalar head layer is initialized randomly, full-scale training tends to yields better results.
 
 ```
-python3 instruct_llama/run_rm_lora.py
+python3 instruct_llama/run_rm.py
 ```
 
-Keep in mind we need to merge the LoRA weights after the training, refer to the instruction mentioned in **Merge LoRA weights** on how to do it.
+Although the above script only supports training on a single GPU, it can be extended to support multiple GPUs and FSDP, please reference `run_pretrain.py` on how to do FSDP.
 
-# Stage 4 - RLHF with PPO
+# Stage 4 - RLHF with PPO (full-scale or 4-bit QLoRA)
 
-The last stage is to train the model using RLHF and the PPO algorithm. This is the most complex part of the project, where it involves lots of moving parts.
+The last stage is to train the model using the PPO algorithm. This is the most complex part of the project, where it involves lots of moving parts.
 
-The goal of this stage is to train the policy model so that we can get higher reward for the completions. Here's an overview of the training pipeline:
+The goal of this stage is to train the policy model so that we can get higher reward for the completions when given some prompt as input. Here's an overview of the training pipeline:
 
 ```
 while not converged:
@@ -202,22 +165,25 @@ Here's an overview of the models involved in this stage:
 3. A reward model with scalar head initialized from the trained RM checkpoint, this model is fixed (frozen) and we only use it to assign rewards to the completions generated by the RL agent during self-play
 4. A SFT model with LM head initialized from the fine-tuned checkpoint, this model is fixed (frozen) and we only use it compute pre-token KL penalty for reward.
 
-In this project, we use a single model with shared policy and value heads for the PPO policy. As we need to run multiple models at the same time, this demands more GPU resource than any of the previous stages. If you have multiple GPUs then you can set the model devices inside the `instruct_llama/configs/rlhf_lora.py` module. Thanks to 4bit quantization and small-sized reward model (3B), when we use 7B model for policy and STF models, we can fit all these 4 models on a single RTX 3090 with 24GB GPU RAM during inference and self-play.
+As we need to run multiple models at the same time, this demands more GPU resource than any of the previous stages. If you have multiple GPUs then you can set the model devices inside the `instruct_llama/configs/rlhf.py` module. Thanks to small-sized reward model (3B), when using 7B model for policy and STF models, we can fit all these 4 models on a single RTX 3090 with 24GB GPU RAM during self-play and training by swapping these models between GPU and CPU.
 
-We can use the following script to launch the RLHF training session. Note we've set the dataset sample limit in the config files, you may want to change that before you run the scripts. Generally in RL, we often need large amount of self-play episodes before we can observer significant performance gains.
+We can use the following script to launch the RLHF full-scale training session. To save computation, we have the option to freeze first N decoder layers for both PPO policy and value modelss.
+
+```
+python3 instruct_llama/run_rlhf.py
+```
+
+It's also possible to run the following script to start RLHF training session with LoRA/QLoRA. However, using 4-bit quantized model will slow down the training speed by at least ~50%. The reason is in RL, the agent needs to spend lots of time to do selfplay generating training samples, unlike supervised fine-tuning, where the training dataset is fixed and provided before hand. However the 4-bit quantized model needs to do more computation in every forward pass, thus makes both selfplay and training much slower.
 
 ```
 python3 instruct_llama/run_rlhf_lora.py
 ```
 
-We can also use the following script to train the PPO policy model with an additional value head. This requires lesser computation but is more sensitive to the hyperparameters since policy and value share the same model.
+If using LoRA/QLoRA, we need to merge the weights once the training is done. You can use the following script to do the conversion, remember to update the file path in the script accordingly.
 
 ```
-python3 instruct_llama/run_rlhf_lora_singlenet.py
+python3 scripts/convert_lora_checkpoint.py
 ```
-
-After the training is done, we can merge the trained policy model with the pre-trained one to get a much better model.
-Keep in mind we need to merge the LoRA weights after the training, refer to the instruction mentioned in **Merge LoRA weights** on how to do it.
 
 # Monitoring with tensorboard
 
@@ -227,14 +193,14 @@ We can monitoring the training progress by using Tensorboard:
 tensorboard --logdir=./logs
 ```
 
-It's very beneficial to monitor the generated samples during RL training. To do so, go to Tensorboard - Text, this works better if we enable MarkDown in Tensorboard.
+It's very beneficial to monitor the generated samples during RL training. To do so, go to Tensorboard - Text, we can then check the prompt text, model generated response, and the corresponding scalar reward. This works better if we enable MarkDown in Tensorboard.
 
 # License
 
 This project is licensed under the MIT License (the "License")
 see the LICENSE file for details
 
-The LLaMA2 model weights are licensed for both researchers and commercial entities. For details, visit: https://github.com/facebookresearch/llama#license.
+For details about LLaMA2 model weights license, visit: https://github.com/facebookresearch/llama#license
 
 # Acknowledgments
 

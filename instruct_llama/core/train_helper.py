@@ -11,7 +11,6 @@ import torch
 import torch.distributed as dist
 from torch.distributed.fsdp.api import ShardingStrategy
 
-import bitsandbytes as bnb
 
 # support running without installing as a package
 from pathlib import Path
@@ -20,7 +19,18 @@ import sys
 wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 
+from instruct_llama.models.model import Transformer
+
+
 logger = logging.getLogger(__name__)
+
+
+def make_model_layer_trainable(model: Transformer, trainable_layers: List[str]):
+    for n, p in model.named_parameters():
+        if trainable_layers and any((l_n in n for l_n in trainable_layers)):
+            p.requires_grad = True
+        else:
+            p.requires_grad = False
 
 
 def create_trace_profiler(tb_trace_dir: str) -> torch.profiler.profile:
@@ -40,7 +50,7 @@ def create_trace_profiler(tb_trace_dir: str) -> torch.profiler.profile:
 
 
 def create_optimizer(
-    model: torch.nn.Module,
+    model: Transformer,
     lr: float,
     eps: float,
     weight_decay: float,
@@ -87,13 +97,11 @@ def create_optimizer(
         {'params': no_decay, 'weight_decay': 0.0},
     ]
 
-    kwargs = {
-        'lr': lr,
-        'eps': eps,
-        'betas': betas,
-    }
+    kwargs = {'lr': lr, 'eps': eps, 'betas': betas}
 
     if paged_adamw:
+        import bitsandbytes as bnb
+
         optimizer = bnb.optim.PagedAdamW(optim_groups, **kwargs)
     else:
         kwargs['fused'] = fused
@@ -102,7 +110,7 @@ def create_optimizer(
     return optimizer
 
 
-def compute_num_trainable_params(model: torch.nn.Module) -> Tuple[int, int]:
+def compute_num_trainable_params(model: Transformer) -> Tuple[int, int]:
     num_trainable_params = 0
     num_frozen_params = 0
 
@@ -122,9 +130,7 @@ def compute_num_trainable_params(model: torch.nn.Module) -> Tuple[int, int]:
     return num_trainable_params, num_frozen_params
 
 
-def split_indices_into_bins(
-    bin_size: int, max_indices: int, min_indices: int = 0, shuffle: bool = False, drop_last: bool = False
-) -> List[List[int]]:
+def split_indices_into_bins(bin_size: int, max_indices: int, min_indices: int = 0, shuffle: bool = False, drop_last: bool = False) -> List[List[int]]:
     """Split indices to small bins."""
 
     max_indices = int(max_indices)
@@ -154,6 +160,9 @@ def split_indices_into_bins(
 
 
 def masked_sum(values: torch.Tensor, mask: torch.Tensor, dim: Optional[Union[int, Tuple]] = None) -> torch.Tensor:
+    assert torch.is_tensor(mask) and mask.dtype == torch.bool
+    assert torch.is_tensor(values) and values.shape == mask.shape
+
     if dim is not None:
         return (values * mask).sum(dim=dim)
     else:
@@ -162,6 +171,9 @@ def masked_sum(values: torch.Tensor, mask: torch.Tensor, dim: Optional[Union[int
 
 def masked_mean(values: torch.Tensor, mask: torch.Tensor, dim: Optional[Union[int, Tuple]] = None) -> torch.Tensor:
     """Compute mean of tensor with a masked values."""
+    assert torch.is_tensor(mask) and mask.dtype == torch.bool
+    assert torch.is_tensor(values) and values.shape == mask.shape
+
     if dim is not None:
         return (values * mask).sum(dim=dim) / mask.sum(dim=dim)
     else:
@@ -170,11 +182,12 @@ def masked_mean(values: torch.Tensor, mask: torch.Tensor, dim: Optional[Union[in
 
 def masked_var(values: torch.Tensor, mask: torch.Tensor, unbiased: bool = True) -> torch.Tensor:
     """Compute variance of tensor with masked values."""
+    assert torch.is_tensor(mask) and mask.dtype == torch.bool
+    assert torch.is_tensor(values) and values.shape == mask.shape
+
     mask_sum = mask.sum()
     if mask_sum == 0 or mask_sum == 1:
-        raise ValueError(
-            f'The sum of the mask is {mask_sum}, which can happen when batch size of mask is 1, try increase the batch size'
-        )
+        raise ValueError(f'The sum of the mask is {mask_sum}, which can happen when batch size of mask is 1, try increase the batch size')
 
     mean = masked_mean(values, mask)
     centered_values = values - mean
@@ -193,27 +206,8 @@ def masked_whiten(values: torch.Tensor, mask: torch.Tensor, shift_mean: bool = T
     whitened = (values - mean) * torch.rsqrt(var + 1e-8)
     if not shift_mean:
         whitened += mean
+    whitened *= mask.float()
     return whitened
-
-
-# def masked_whiten(values: torch.Tensor, mask: torch.Tensor, shift_mean: bool = True) -> torch.Tensor:
-#     assert torch.is_tensor(mask) and mask.dtype == torch.bool
-#     assert torch.is_tensor(values) and values.shape == mask.shape
-
-#     # Compute mean and variance only where mask is True
-#     mean = torch.mean(values[mask])
-#     var = torch.var(values[mask])
-
-#     # Initialize whitened tensor with zeros
-#     whitened = torch.zeros_like(values)
-
-#     # Compute whitened values only where mask is True
-#     whitened[mask] = (values[mask] - mean) * torch.rsqrt(var + 1e-8)
-
-#     # Optionally shift mean back
-#     if not shift_mean:
-#         whitened[mask] += mean
-#     return whitened
 
 
 def get_grad_norm_local(model) -> torch.Tensor:
@@ -232,3 +226,23 @@ def get_grad_norm_fsdp(model, rank, world_size, sharding_strategy=ShardingStrate
     if sharding_strategy == ShardingStrategy.NO_SHARD:
         return_norm = return_norm / world_size
     return return_norm**0.5
+
+
+def optimizer_to(optim: torch.optim.Optimizer, device: str):
+    """Move pytorch optimizer to some device
+
+    Code copied from
+    https://discuss.pytorch.org/t/moving-optimizer-from-cpu-to-gpu/96068/3
+    """
+    for param in optim.state.values():
+        # Not sure there are any global tensors in the state dict
+        if isinstance(param, torch.Tensor):
+            param.data = param.data.to(device)
+            if param._grad is not None:
+                param._grad.data = param._grad.data.to(device)
+        elif isinstance(param, dict):
+            for subparam in param.values():
+                if isinstance(subparam, torch.Tensor):
+                    subparam.data = subparam.data.to(device)
+                    if subparam._grad is not None:
+                        subparam._grad.data = subparam._grad.data.to(device)
