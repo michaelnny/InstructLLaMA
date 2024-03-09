@@ -32,7 +32,6 @@ Check the [article post](https://www.vectortheta.com/blog/InstructLLaMA) on the 
   - `run_sft_lora.py` basically the same as `run_sft.py`, but support 4-bit QLoRA (only supports single GPU).
   - `run_rm.py` train reward model (full-scale) starting from supervised fine-tuning model (only supports single GPU).
   - `run_rlhf.py` run (full-scale) RL PPO to train policy and value models, starting from supervised fine-tuning model and reward model respectively (supports allocate different models on different GPUs on a single machine, but no DDP or FSDP).
-  - `run_rlhf_lora.py` basically same as `run_rlhf.py`, but support 4-bit QLoRA (no DDP or FSDP).
 
 - `scripts` directory contains all source code for convert the model weights and build datasets for different phases.
   - `build_pretrain_datasets.py` build pre-train datasets (save the dataset in Numpy memmap structure), the dataset is optional during training using RLHF with PPO phase.
@@ -76,7 +75,7 @@ python3 scripts/build_finetune_datasets.py
 1. Run the `run_pretrain.py` script to train a LLaMA model from scratch. We only use it to train a 1B model so we can later use it as the reward model. Most of the time we would want to use Meta's pre-trained weights and skip this stage altogether.
 2. Run the `run_sft.py` or `run_sft_lora.py` script to fine-tune the model, this requires a pre-trained model, such as the one from Meta or from above pretrain stage. Check and maintain the configuration inside `configs/sft.py` and `configs/sft_lora.py` if necessary.
 3. Run the `run_rm.py` script to train a reward model, this requires a fine-tuned model. Check and maintain the configuration inside `configs/rm.py` if necessary.
-4. Run the `run_rlhf.py` or `run_rlhf_lora.py` script to train a policy model using RLHF and PPO, this requires a fine-tuned model and the reward model (frozen). Check and maintain the configuration inside `configs/rlhf.py` and `configs/rlhf_lora.py` if necessary.
+4. Run the `run_rlhf.py` script to train a policy model using RLHF and PPO, this requires a fine-tuned model and the reward model (frozen). Check and maintain the configuration inside `configs/rlhf.py` if necessary.
 
 It's important to mention that the training prompts in RLHF stage must coming from the same data distribution as the samples used to train the reward model. Otherwise, the reward signal would be noise and the model will collapse. In addition, the fine-tuning stage should also contain the same sample distribution, since we need the SFT model as a reference policy to compute KL penalties.
 
