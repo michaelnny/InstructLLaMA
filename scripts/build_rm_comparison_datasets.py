@@ -138,12 +138,12 @@ def _question_contains_skip_words(question: str) -> bool:
     return False
 
 
-def _filter_answers(answers: Answers, min_responses: int, max_responses: int, remove_zero_score: bool) -> Answers:
+def _filter_answers(answers: Answers, min_responses: int, max_responses: int, remove_zero_score: bool = False) -> Answers:
     assert min_responses >= 2 and max_responses > min_responses
 
     if remove_zero_score:
         answers = _remove_answers_with_zero_score(answers)
-    answers = _deduplicate_answers_by_score(answers)
+    answers = _deduplicate_answers_by_score(answers)  # drop ties
 
     if len(answers) < min_responses:
         return []
@@ -484,7 +484,7 @@ if __name__ == '__main__':
     tokenizer = Tokenizer(model_path='/home/michael/models/meta_llama2/tokenizer.model')
 
     process_hh_rlhf_dataset(
-        src_dir='/home/michael/datasets/hh-rlhf',
+        src_dir='/home/michael/datasets/hh-rlhf/helpful-base',
         output_dir='./datasets/hh_rlhf_comparison',
         tokenizer=tokenizer,
         num_workers=16,
@@ -495,5 +495,6 @@ if __name__ == '__main__':
         output_dir='./datasets/stack_exchange_comparison',
         tokenizer=tokenizer,
         num_workers=16,
-        max_responses=4,
+        min_responses=3,
+        max_responses=5,
     )

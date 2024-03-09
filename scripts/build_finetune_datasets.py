@@ -54,6 +54,7 @@ DEFAULT_DIALOG = [DEFAULT_SYSTEM_PROMPT]
 
 Answers = List[Mapping[Text, Any]]
 # ----------------------------------- helper functions -----------------------------------
+KEYWORDS_TO_SKIP = ['photo', 'video', 'movie', 'youtube', 'YouTube']
 
 
 def _split_and_save_datasets(
@@ -404,10 +405,8 @@ def process_deepmind_math_dataset(
     metadata['vocab_size'] = tokenizer.vocab_size
     metadata['data_structure'] = 'A list of prompt:completion token sequences pairs.'
 
-    if len(datasets) > max_samples:
+    if max_samples > 0 and len(datasets) > max_samples:
         logger.info(f'Truncate data to max size of {max_samples}')
-        random.shuffle(datasets)
-        random.shuffle(datasets)
         random.shuffle(datasets)
         datasets = datasets[:max_samples]
 
@@ -638,6 +637,18 @@ def _convert_to_llama_chat_format(raw_text) -> Dialog:
     return dialog
 
 
+def _string_found(string1: str, string2: str) -> bool:
+    if re.search(r'\b' + re.escape(string1) + r'\b', string2):
+        return True
+    return False
+
+
+def _question_contains_skip_words(question: str) -> bool:
+    if any(_string_found(question, k) for k in KEYWORDS_TO_SKIP):
+        return True
+    return False
+
+
 def _sort_answers_by_score_desc(answers: Answers) -> Answers:
     out = sorted(answers, key=lambda d: d['pm_score'], reverse=True)
     return out
@@ -667,7 +678,10 @@ def _process_single_stackexchange_file(
         question = row['question']
         answers = row['answers']
 
-        if len(answers) < 1:
+        if _question_contains_skip_words(question):
+            continue
+
+        if len(answers) < 2:
             continue
 
         answers = _sort_answers_by_score_desc(answers)
@@ -925,7 +939,7 @@ if __name__ == '__main__':
         src_dirs=['/home/michael/datasets/mathematics_dataset-v1.0/train-easy'],
         output_dir='./datasets/deepmind_mathematics',
         tokenizer=tokenizer,
-        max_samples=20000,
+        max_samples=10000,
         filter_by_names=[
             'arithmetic__add_or_sub.txt',
             'arithmetic__add_sub_multiple.txt',
@@ -935,7 +949,7 @@ if __name__ == '__main__':
     )
 
     process_hh_dataset(
-        src_dir='/home/michael/datasets/hh-rlhf',
+        src_dir='/home/michael/datasets/hh-rlhf/helpful-base',
         output_dir='./datasets/hh_rlhf_finetune',
         tokenizer=tokenizer,
         num_workers=16,

@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 def make_model_layer_trainable(model: Transformer, trainable_layers: List[str]):
     for n, p in model.named_parameters():
-        if trainable_layers and any((l_n in n for l_n in trainable_layers)):
+        if trainable_layers and any((train_n in n or train_n == n for train_n in trainable_layers)):
             p.requires_grad = True
         else:
             p.requires_grad = False

@@ -30,19 +30,7 @@ from instruct_llama.core.schedule import CosineDecayWithWarmupLRScheduler
 from instruct_llama.core.train_helper import make_model_layer_trainable, create_optimizer, compute_num_trainable_params
 from instruct_llama.core.rl_ppo import AdaptiveKLController, PPOAgent
 from instruct_llama.utils.logger import create_logger
-from instruct_llama.utils.checkpoint import create_checkpoint
-
-
-logger = create_logger()
-
-
-def convert_model_to_dtype(model: Transformer, compute_dtype: torch.dtype):
-    # try to convert the model to half precision, otherwise we can't even move the 7B model to a single RTX 3090
-    for name, module in model.named_modules():
-        if 'norm' in name:  # for better performance, always use full precision for normalization layers
-            module = module.to(dtype=torch.float32)
-        else:
-            module = module.to(dtype=compute_dtype)
+from instruct_llama.utils.checkpoint import create_checkpoint, create_agent_checkpoint
 
 
 def build_model(
@@ -54,6 +42,8 @@ def build_model(
     max_batch_size: int = 1,
     embed_dropout: float = 0.0,
     attn_dropout: float = 0.0,
+    resid_dropout: float = 0.0,
+    head_dropout: float = 0.0,
     gradient_checkpointing: bool = False,
     frozen: bool = True,
     head_type: str = 'lm_head',
@@ -72,6 +62,8 @@ def build_model(
         max_batch_size=(max_batch_size if (head_type == 'dual_head' or head_type == 'lm_head') and not frozen else 1),
         embed_dropout=0.0 if frozen else embed_dropout,
         attn_dropout=0.0 if frozen else attn_dropout,
+        resid_dropout=0.0 if frozen else resid_dropout,
+        head_dropout=0.0 if frozen else head_dropout,
         gradient_checkpointing=False if frozen else gradient_checkpointing,
     )
 
@@ -83,7 +75,8 @@ def build_model(
         model.load_state_dict(model_state, strict=strict)
         del model_state  # free up CPU RAM
 
-    convert_model_to_dtype(model, compute_dtype)
+    for name, module in model.named_modules():
+        module = module.to(dtype=compute_dtype)
 
     if frozen:
         for p in model.parameters():
@@ -101,8 +94,9 @@ def main():
     assert cfg.selfplay_log_interval >= 1
     assert cfg.min_gen_len >= 1
     assert cfg.max_gen_len >= 50
-    assert cfg.max_prompt_len + cfg.max_gen_len <= cfg.max_seq_len
     assert cfg.ckpt_interval >= 1
+
+    logger = create_logger()
 
     if cfg.reward_device == cfg.ref_device == cfg.policy_device == cfg.value_device or cfg.policy_device == cfg.value_device or cfg.reward_device == cfg.ref_device:
         logger.warning('Run models on the same device could cause CUDA OOM!!!!!!')
@@ -201,6 +195,8 @@ def main():
         max_batch_size=cfg.selfplay_batch_size,
         embed_dropout=cfg.embed_dropout,
         attn_dropout=cfg.attn_dropout,
+        resid_dropout=cfg.resid_dropout,
+        head_dropout=cfg.head_dropout,
         gradient_checkpointing=cfg.gradient_checkpointing,
         frozen=False,
     )
@@ -214,6 +210,8 @@ def main():
         max_seq_len=cfg.max_seq_len,
         embed_dropout=cfg.embed_dropout,
         attn_dropout=cfg.attn_dropout,
+        resid_dropout=cfg.resid_dropout,
+        head_dropout=cfg.head_dropout,
         gradient_checkpointing=cfg.gradient_checkpointing,
         frozen=False,
     )
@@ -222,26 +220,32 @@ def main():
     policy_trainable_layers = ['post_norm', 'lm_head']
     value_trainable_layers = ['post_norm', 'scalar_head']
     for i in range(cfg.policy_frozen_layers, policy_model.n_layers):
-        policy_trainable_layers.append(f'layers.{i}')
-    for i in range(cfg.value_frozen_layers, value_model.n_layers):
-        value_trainable_layers.append(f'layers.{i}')
+        if cfg.train_atten_qv_layers_only:
+            # only train the attention query and value layers in the encoder block, this can save more GPU resource
+            policy_trainable_layers.append(f'layers.{i}.attention.wq')
+            policy_trainable_layers.append(f'layers.{i}.attention.wv')
+        else:
+            # train the entire encoder block
+            policy_trainable_layers.append(f'layers.{i}')
 
-    logger.info(f'PPO policy trainable layers:\n{policy_trainable_layers}')
+    for i in range(cfg.value_frozen_layers, value_model.n_layers):
+        if cfg.train_atten_qv_layers_only:
+            # only train the attention query and value layers in the encoder block, this can save more GPU resource
+            value_trainable_layers.append(f'layers.{i}.attention.wq')
+            value_trainable_layers.append(f'layers.{i}.attention.wv')
+        else:
+            # train the entire encoder block
+            value_trainable_layers.append(f'layers.{i}')
+
+    # logger.info(f'PPO policy trainable layers:\n{policy_trainable_layers}')
     make_model_layer_trainable(policy_model, policy_trainable_layers)
 
     num_trainable, num_frozen = compute_num_trainable_params(policy_model)
     logger.info(f'PPO policy number of trainable parameters: {num_trainable:,}')
     logger.info(f'PPO policy number of frozen parameters: {num_frozen:,}')
 
-    logger.info(f'PPO value trainable layers:\n{value_trainable_layers}')
-    make_model_layer_trainable(value_model, value_trainable_layers)
-
-    num_trainable, num_frozen = compute_num_trainable_params(value_model)
-    logger.info(f'PPO value number of trainable parameters: {num_trainable:,}')
-    logger.info(f'PPO value number of frozen parameters: {num_frozen:,}')
-
     max_train_steps = int(cfg.ppo_update_epochs * (cfg.max_episodes / cfg.ppo_batch_size))
-    num_epochs = cfg.max_episodes // cfg.train_rollout_size
+    num_iterations = cfg.max_episodes // cfg.train_rollout_size
 
     policy_optimizer = create_optimizer(
         model=policy_model,
@@ -261,6 +265,13 @@ def main():
         max_decay_steps=max_train_steps,
     )
 
+    # logger.info(f'PPO value trainable layers:\n{value_trainable_layers}')
+    make_model_layer_trainable(value_model, value_trainable_layers)
+
+    num_trainable, num_frozen = compute_num_trainable_params(value_model)
+    logger.info(f'PPO value number of trainable parameters: {num_trainable:,}')
+    logger.info(f'PPO value number of frozen parameters: {num_frozen:,}')
+
     value_optimizer = create_optimizer(
         model=value_model,
         lr=cfg.value_init_lr,
@@ -278,6 +289,16 @@ def main():
         warmup_steps=cfg.value_lr_warmup_steps,
         max_decay_steps=max_train_steps,
     )
+
+    log_dir = os.path.join(cfg.log_dir, cfg.policy_model_type)
+    policy_ckpt_dir = os.path.join(cfg.ckpt_dir, f'policy/{cfg.policy_model_type}')
+    value_ckpt_dir = os.path.join(cfg.ckpt_dir, f'value/{cfg.value_model_type}')
+    agent_ckpt_dir = os.path.join(cfg.ckpt_dir, f'agent/{cfg.policy_model_type}')
+
+    os.makedirs(log_dir, exist_ok=True)
+    os.makedirs(policy_ckpt_dir, exist_ok=True)
+    os.makedirs(value_ckpt_dir, exist_ok=True)
+    os.makedirs(agent_ckpt_dir, exist_ok=True)
 
     ppo_agent = PPOAgent(
         tokenizer=tokenizer,
@@ -313,24 +334,23 @@ def main():
         policy_device=cfg.policy_device,
         value_device=cfg.value_device,
         ptx_loader=train_ptx_loader,
-        tb_writer=SummaryWriter(os.path.join(cfg.log_dir, cfg.policy_model_type)),
+        reward_normalizer_ckpt=cfg.reward_normalizer_ckpt_file,
+        tb_writer=SummaryWriter(log_dir),
     )
 
+    # Load agent internal state when resume training
+    if cfg.agent_ckpt_file is not None and os.path.exists(cfg.agent_ckpt_file):
+        agent_state = torch.load(cfg.agent_ckpt_file)
+        ppo_agent.load_state_dict(agent_state)
+
     # --------------- Start Training ---------------
+    logger.info(f'Starting to train the model using RL PPO over {num_iterations} iterations ...')
 
-    os.makedirs(cfg.log_dir, exist_ok=True)
-    os.makedirs(cfg.ckpt_dir, exist_ok=True)
-    os.makedirs(os.path.join(cfg.ckpt_dir, 'policy'), exist_ok=True)
-    os.makedirs(os.path.join(cfg.ckpt_dir, 'value'), exist_ok=True)
-
-    logger.info(f'Starting to train the model using RL PPO over {num_epochs} epochs ...')
-
-    for epoch in range(1, num_epochs + 1):  # one epoch is just M episodes
-        logger.info(f'Epoch {epoch}')
+    for iter in range(1, num_iterations + 1):
+        logger.info(f'Iteration {iter}')
         logger.info(f'Starting to generate {cfg.train_rollout_size} train episodes ...')
 
         ppo_agent.run_selfplay(
-            epoch=epoch,
             dataset=train_prompt_dataset,
             num_episodes=cfg.train_rollout_size,
             batch_size=cfg.selfplay_batch_size,
@@ -349,18 +369,18 @@ def main():
         logger.info(f'Starting to train the agent using {len(ppo_agent.buffer)} selfplay episodes ...')
 
         torch.cuda.empty_cache()
-        ppo_agent.run_ppo_training_steps(log_interval=cfg.train_log_interval)
+        ppo_agent.run_train(log_interval=cfg.train_log_interval)
 
         # regular checkpointing
-        if epoch % cfg.ckpt_interval == 0:
-            create_checkpoint(policy_model, os.path.join(cfg.ckpt_dir, f'policy/{cfg.policy_model_type}-epoch-{epoch}.pth'))
-            create_checkpoint(value_model, os.path.join(cfg.ckpt_dir, f'value/{cfg.value_model_type}-epoch-{epoch}.pth'))
+        if iter % cfg.ckpt_interval == 0:
+            create_checkpoint(policy_model, os.path.join(policy_ckpt_dir, f'policy-{cfg.policy_model_type}-iter-{iter}.pth'))
+            create_checkpoint(value_model, os.path.join(value_ckpt_dir, f'value-{cfg.value_model_type}-iter-{iter}.pth'))
+            create_agent_checkpoint(ppo_agent, os.path.join(agent_ckpt_dir, f'agent-{cfg.policy_model_type}-iter-{iter}.pth'))
 
         # validation episodes
-        if cfg.var_interval > 0 and epoch % cfg.var_interval == 0:
+        if cfg.var_interval > 0 and iter % cfg.var_interval == 0:
             logger.info(f'Starting to generate {cfg.val_rollout_size} validation episodes ...')
             ppo_agent.run_selfplay(
-                epoch=epoch,
                 dataset=val_prompt_dataset,
                 num_episodes=cfg.val_rollout_size,
                 batch_size=cfg.selfplay_batch_size,
@@ -375,8 +395,9 @@ def main():
             )
 
     # create final checkpoints
-    create_checkpoint(policy_model, os.path.join(cfg.ckpt_dir, f'policy/{cfg.policy_model_type}-epoch-{epoch}.pth'))
-    create_checkpoint(value_model, os.path.join(cfg.ckpt_dir, f'value/{cfg.value_model_type}-epoch-{epoch}.pth'))
+    create_checkpoint(policy_model, os.path.join(policy_ckpt_dir, f'policy-{cfg.policy_model_type}-iter-{iter}.pth'))
+    create_checkpoint(value_model, os.path.join(value_ckpt_dir, f'value-{cfg.value_model_type}-iter-{iter}.pth'))
+    create_agent_checkpoint(ppo_agent, os.path.join(agent_ckpt_dir, f'agent-{cfg.policy_model_type}-iter-{iter}.pth'))
 
 
 if __name__ == '__main__':

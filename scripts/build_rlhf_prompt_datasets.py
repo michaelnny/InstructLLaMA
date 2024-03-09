@@ -15,7 +15,8 @@ import random
 import pickle
 import torch
 import pyarrow.parquet as pq
-
+import re
+import numpy as np
 
 # support running without installing as a package
 from pathlib import Path
@@ -141,10 +142,67 @@ def _process_single_jsonl_file(
     return samples
 
 
+def _string_found(string1: str, string2: str) -> bool:
+    if re.search(r'\b' + re.escape(string1) + r'\b', string2):
+        return True
+    return False
+
+
+def _question_contains_skip_words(question: str) -> bool:
+    if any(_string_found(question, k) for k in KEYWORDS_TO_SKIP):
+        return True
+    return False
+
+
+def _remove_answers_with_zero_score(answers: Answers) -> Answers:
+    out = [a for a in answers if int(a['pm_score']) != 0]
+
+    assert all([int(a['pm_score']) != 0 for a in out])
+
+    return out
+
+
+def _deduplicate_answers_by_score(answers: Answers, shuffle: bool = True) -> Answers:
+    if shuffle:
+        # add some randomness so we are not always using the first occurrence of some score
+        random.shuffle(answers)
+
+    scores = [a['pm_score'] for a in answers]
+
+    if len(answers) == len(set(scores)):
+        return answers
+
+    _, unique_indices = np.unique(scores, return_index=True)
+
+    out = [answers[i] for i in unique_indices]
+
+    assert len(out) == len(set(scores))
+
+    return out
+
+
+def _filter_answers(answers: Answers, min_responses: int, max_responses: int, remove_zero_score: bool = False) -> Answers:
+    assert min_responses >= 2 and max_responses > min_responses
+
+    if remove_zero_score:
+        answers = _remove_answers_with_zero_score(answers)
+    answers = _deduplicate_answers_by_score(answers)  # drop ties
+
+    if len(answers) < min_responses:
+        return []
+
+    if len(answers) > max_responses:
+        answers = answers[:max_responses]
+
+    return answers
+
+
 def _process_single_stackexchange_file(
     file_path: str,
     tokenizer: Tokenizer,
     max_seq_len: int,
+    min_responses: int,
+    max_responses: int,
 ) -> List[Tuple[int]]:
     """
     Read one single .parquet file and go over each row to build the dataset samples.
@@ -155,6 +213,14 @@ def _process_single_stackexchange_file(
 
     for index, row in df.iterrows():
         question = row['question']
+        answers = row['answers']
+
+        if _question_contains_skip_words(question):
+            continue
+
+        answers = _filter_answers(answers, min_responses=min_responses, max_responses=max_responses)
+        if len(answers) < min_responses:
+            continue
 
         # build prompt tokens once
         dialog = DEFAULT_DIALOG + [
@@ -265,6 +331,8 @@ def process_stackexchange_dataset(
     src_dir: str,
     output_dir: str,
     tokenizer: Tokenizer,
+    min_responses: int = 2,
+    max_responses: int = 8,  # maximum responses per sample
     num_workers=8,
     validation_ratio: float = 0.05,
     max_seq_length: int = 2048,  # prompt + completion lengths greater than this are discarded
@@ -314,6 +382,8 @@ def process_stackexchange_dataset(
     process_file_func = functools.partial(
         _process_single_stackexchange_file,
         max_seq_len=max_seq_length,
+        min_responses=min_responses,  # to get the same distribution as samples used to train RM
+        max_responses=max_responses,
         tokenizer=tokenizer,
     )
 
@@ -349,7 +419,7 @@ if __name__ == '__main__':
     tokenizer = Tokenizer(model_path='/home/michael/models/meta_llama2/tokenizer.model')
 
     process_hh_rlhf_dataset(
-        src_dir='/home/michael/datasets/hh-rlhf',
+        src_dir='/home/michael/datasets/hh-rlhf/helpful-base',
         output_dir='./datasets/hh_rlhf_prompt_only',
         tokenizer=tokenizer,
         num_workers=16,
@@ -360,4 +430,6 @@ if __name__ == '__main__':
         output_dir='./datasets/stack_exchange_prompt_only',
         tokenizer=tokenizer,
         num_workers=16,
+        min_responses=3,
+        max_responses=5,
     )

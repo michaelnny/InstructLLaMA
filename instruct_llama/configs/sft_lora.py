@@ -20,22 +20,20 @@ class config:
 
     # datasets
     train_datasources: Tuple[str] = (
-        './datasets/alpaca/train.pkl',
-        './datasets/hh_rlhf_finetune/train.pkl',  # 120k
-        # './datasets/stack_exchange_finetune/train.pkl',
+        # './datasets/alpaca/train.pkl',
         # './datasets/dolly/train.pkl',
         # './datasets/squad/train.pkl',
-        # './datasets/commonsense_dialogues/train.pkl',
         # './datasets/deepmind_mathematics/train.pkl',
+        # './datasets/commonsense_dialogues/train.pkl',
+        './datasets/hh_rlhf_finetune/train.pkl',  # train reference policy for RLHF training
     )
     val_datasources: Tuple[str] = (
-        './datasets/alpaca/validation.pkl',
-        './datasets/hh_rlhf_finetune/validation.pkl',
-        # './datasets/stack_exchange_finetune/validation.pkl',
+        # './datasets/alpaca/validation.pkl',
         # './datasets/dolly/validation.pkl',
         # './datasets/squad/validation.pkl',
-        # './datasets/commonsense_dialogues/validation.pkl',
         # './datasets/deepmind_mathematics/validation.pkl',
+        # './datasets/commonsense_dialogues/validation.pkl',
+        './datasets/hh_rlhf_finetune/validation.pkl',
     )
     dataloader_workers: int = 1
 
@@ -45,20 +43,20 @@ class config:
     full_pad: bool = False
 
     # training and validation loops
-    num_epochs: int = 2
+    num_epochs: int = 5
     # accumulate gradients so for each iteration, the actual batch size is = train_batch_size x gradient_accum_steps
-    train_batch_size: int = 3
-    gradient_accum_steps: int = 12
+    train_batch_size: int = 2
+    gradient_accum_steps: int = 16
     val_interval: int = 500
-    val_batch_size: int = 30
     val_steps: int = 20
+    val_batch_size: int = 30
     log_interval: int = 5  # log training metrics (loss, accuracy)
     ckpt_interval: int = 500  # save model checkpoints every N Training steps
 
     # LoRA configuration
     lora_r: int = 128
     lora_scaling: float = 1.0  # set the LoRA scaling, by default 1.0 no scaling
-    lora_dropout: float = 0.05
+    lora_dropout: float = 0.0
 
     # LoRA trainable layers
     lora_attn_query: bool = True  # train Attention query layer
@@ -71,32 +69,34 @@ class config:
     train_bias: str = 'none'  # none, lora_only, all
 
     # Quantization
-    quant_4bit: bool = True  # quantize frozen linear layer
+    quant_4bit: bool = False  # quantize frozen linear layer
     quant_lora_4bit: bool = False  # quantize LoRA linear layer
     quant_4bit_double: bool = True  # double quantize
     quant_4bit_type: str = 'nf4'  # only supports 'fp4' or 'nf4'
 
     # learning rate, should use smaller lr if also train lm head since we don't apply LoRA to the head layer
-    init_lr: float = 1e-5  # initial learning rate
-    max_lr: float = 1e-4  # max learning rate after warm up
-    min_lr: float = 1e-5  # min learning rate after decay
-    warmup_ratio: float = 0.02
+    init_lr: float = 1.4e-5  # initial learning rate
+    max_lr: float = 1.4e-5  # max learning rate after warm up
+    min_lr: float = 1.4e-6  # min learning rate after decay
+    warmup_ratio: float = 0.0
 
     # prompt is less important than completion
-    prompt_loss_weight: float = 0.0
+    prompt_loss_weight: float = 0.01
     completion_loss_weight: float = 1.0
 
     # AdamW optimizer
     use_paged_adamw: bool = False
     weight_decay: float = 0.0
-    adam_betas: Tuple = (0.9, 0.999)
+    adam_betas: Tuple = (0.9, 0.95)
     adam_eps: float = 1e-5
     adam_fused: bool = True  # only applicable if not using bitsandbytes optimizer
     grad_clip: float = 1.0
 
     # dropout regularization
-    embed_dropout: float = 0.0
-    attn_dropout: float = 0.0
+    embed_dropout: float = 0.1
+    attn_dropout: float = 0.1
+    resid_dropout: float = 0.2
+    head_dropout: float = 0.1
 
     gradient_checkpointing: bool = False
     mixed_precision: bool = True  # default to BF16, but if no native GPU support detected, will use FP16.

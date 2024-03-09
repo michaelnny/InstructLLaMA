@@ -6,15 +6,13 @@
 """Run supervised fine-tuning (STF) using QLoRA, starting with a pretrained model."""
 import os
 import functools
-from typing import Tuple, Mapping, Text, Any, Dict
 import tqdm
 import random
 
 import numpy as np
 
 import torch
-from torch.nn import functional as F
-from torch.utils.data import DataLoader, RandomSampler
+from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 # support running without installing as a package
@@ -42,184 +40,11 @@ from instruct_llama.utils.logger import create_logger, log_statistics
 from instruct_llama.utils.tracker import StatsTracker
 from instruct_llama.utils.checkpoint import create_lora_checkpoint
 
-logger = create_logger()
+from instruct_llama.run_sft import train_step, update_step, run_validation_steps, custom_collate_fn
 
 
 def clear_gpu_cache():
     torch.cuda.empty_cache()
-
-
-def compute_finetune_loss(logits: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    assert len(logits.shape) == 3  # [B, max_seq_len, vocab_size]
-    assert len(targets.shape) == len(mask.shape) == 2  # [B, max_seq_len]
-    assert logits.shape[0] == targets.shape[0] == mask.shape[0]
-
-    B, T, *_ = logits.shape
-    losses = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), reduction='none')
-    assert not torch.any(torch.isnan(losses))
-    losses = losses.view(B, T)
-    assert losses.shape == mask.shape
-
-    # loss mask is defined as: -1s are prompt tokens, 1s are completion tokens, and 0s the padding tokens
-    # note here prompt is less important than completion
-    weights = mask.float().masked_fill(mask == -1, cfg.prompt_loss_weight).masked_fill(mask == 1, cfg.completion_loss_weight)
-    losses *= weights  # [batch_size, seq_len]
-    losses = losses.mean(1)  # [batch_size]
-    return losses
-
-
-@torch.no_grad()
-def compute_metrics(logits: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor) -> Tuple[int, int]:
-    assert len(logits.shape) == 3  # [B, max_seq_len, vocab_size]
-    assert len(targets.shape) == 2  # [B, max_seq_len]
-    assert targets.shape == mask.shape  # [B, max_seq_len]
-    assert logits.shape[0] == targets.shape[0]
-
-    # loss mask is defined as: -1s are prompt tokens, 1s are completion tokens, and 0s the padding tokens
-    # only include completion when compute accuracy
-    weights = mask.float().masked_fill(mask == -1, 0)
-
-    # get the index of the max log-probability
-    pred = torch.softmax(logits, dim=-1).argmax(dim=-1)
-
-    correct = pred.eq(targets.view_as(pred)).float()
-
-    # only consider completion when compute metrics
-    correct *= weights
-    num_accurate = correct.sum().item()
-    num_samples = weights.bool().sum().item()
-
-    return (num_accurate, num_samples)
-
-
-def train_step(
-    model: Transformer,
-    batch: Tuple[torch.Tensor],
-    scaler: torch.cuda.amp.GradScaler,
-    gradient_accum_steps: int,
-    tracker: StatsTracker,
-) -> None:
-    """Run a single training step, where we do a forward + backward passes, but do no update parameters"""
-
-    assert gradient_accum_steps >= 1
-
-    x, y, loss_mask = batch
-    x, y, loss_mask = (
-        x.to('cuda', non_blocking=True),
-        y.to('cuda', non_blocking=True),
-        loss_mask.to('cuda', non_blocking=True),
-    )
-
-    output = model(x)
-
-    losses = compute_finetune_loss(output, y, loss_mask)  # [batch_size]
-    loss = losses.mean()
-    # scale the loss to account for gradient accumulation
-    scaled_loss = loss / gradient_accum_steps
-
-    if scaler is not None:  # when using float16
-        scaler.scale(scaled_loss).backward()
-    else:
-        scaled_loss.backward()
-
-    num_acc, num_samples = compute_metrics(output.detach(), y.detach(), loss_mask.detach())
-    tracker.update(losses.detach(), num_acc, num_samples)
-
-
-def update_step(
-    model: Transformer,
-    optimizer: torch.optim.AdamW,
-    scheduler: CosineDecayWithWarmupLRScheduler,
-    grad_clip: float,
-    scaler: torch.cuda.amp.GradScaler = None,
-) -> None:
-    """Run a single parameter update step"""
-    if grad_clip > 0.0:
-        if scaler is not None:  # when using float16
-            scaler.unscale_(optimizer)  # unscale before clip gradients
-
-        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-
-    if scaler is not None:  # when using float16
-        scaler.step(optimizer)
-        scaler.update()  # adjust scaling for next batch
-    else:
-        optimizer.step()
-
-    # prepare for next update
-    optimizer.zero_grad(set_to_none=True)
-    scheduler.step()  # call lr scheduler on a step-by-step basis instead of epoch
-
-
-@torch.no_grad()
-def run_validation_steps(
-    model: Transformer,
-    loader: DataLoader,
-    steps: int,
-    tracker: StatsTracker,
-) -> None:
-    """Run M validation steps"""
-
-    tracker.reset()
-    val_pbar = tqdm.tqdm(range(steps), colour='green', desc='Validation steps')
-    for i, (x, y, loss_mask) in enumerate(loader):
-        x, y, loss_mask = (
-            x.to('cuda', non_blocking=True),
-            y.to('cuda', non_blocking=True),
-            loss_mask.to('cuda', non_blocking=True),
-        )
-
-        output = model(x)
-        losses = compute_finetune_loss(output, y, loss_mask)  # [batch_size]
-        num_acc, num_samples = compute_metrics(output.detach(), y.detach(), loss_mask.detach())
-        tracker.update(losses.detach(), num_acc, num_samples)
-
-        val_pbar.update(1)
-
-        if i + 1 >= steps:
-            break
-
-    val_pbar.close()
-
-
-def custom_collate_fn(batch, pad_id: int, max_seq_len: int, full_pad: bool = False) -> Tuple[torch.Tensor]:
-    """
-    Custom collate function to pad the sequence to maximum length in the batch,
-    and compute the loss mask for the batch.
-    """
-
-    batch_size = len(batch)
-
-    max_batch_seq_len = max([len(item[0]) + len(item[1]) for item in batch])
-    assert max_batch_seq_len <= max_seq_len
-
-    if full_pad:
-        max_batch_seq_len = max_seq_len
-
-    # concatenate prompt, completion together
-    batch_sequences = torch.full((batch_size, max_batch_seq_len), pad_id, dtype=torch.long)
-
-    # loss mask where -1s are prompt tokens, 1s are completion tokens, and 0s are padding tokens
-    loss_mask = torch.full((batch_size, max_batch_seq_len), 0, dtype=torch.long)
-
-    for i, (prompt, completion) in enumerate(batch):
-        # need prompt, completion lengths to compute loss mask
-        prompt_len, completion_len = len(prompt), len(completion)
-        seq_len = prompt_len + completion_len
-        seq = torch.concat((prompt, completion), dim=0).type(torch.long)
-
-        # right padding, a simplified example where 0s are pad id: [1, 2, 3] -> [1, 2, 3, 0, 0]
-        batch_sequences[i, :seq_len] = seq
-        loss_mask[i, :prompt_len] = -1  # prompt tokens
-        loss_mask[i, prompt_len : prompt_len + completion_len] = 1  # completion tokens
-
-    x = batch_sequences[:, :-1]  # [batch_size, max_batch_seq_len - 1]
-    y = batch_sequences[:, 1:]  # [batch_size, max_batch_seq_len - 1]
-
-    # shift to right to align with y
-    loss_mask = loss_mask[:, 1:]
-
-    return x, y, loss_mask
 
 
 def main():
@@ -236,10 +61,8 @@ def main():
     if not os.path.exists(cfg.pretrain_ckpt_file):
         raise ValueError(f'Invalid pretrained checkpoint {cfg.pretrain_ckpt_file!r}, aborting ...')
 
-    if cfg.lora_head and 'lm_head' in cfg.additional_layers:
-        raise ValueError(f'Conflict option of `lora_head=true` and {cfg.additional_layers}, aborting ...')
-
     # --------------- Load datasets ---------------
+    logger = create_logger()
 
     logger.info('Loading datasets ...')
 
@@ -321,6 +144,8 @@ def main():
         max_seq_len=cfg.max_seq_len,
         embed_dropout=cfg.embed_dropout,
         attn_dropout=cfg.attn_dropout,
+        resid_dropout=cfg.resid_dropout,
+        head_dropout=cfg.head_dropout,
         gradient_checkpointing=cfg.gradient_checkpointing,
     )
 
@@ -336,10 +161,7 @@ def main():
 
     # try to convert the model to half precision, otherwise we can't even move the 7B model to a single RTX 3090
     for name, module in model.named_modules():
-        if 'norm' in name:  # for better performance, always use full precision for normalization layers
-            module = module.to(dtype=torch.float32)
-        else:
-            module = module.to(dtype=compute_dtype)
+        module = module.to(dtype=compute_dtype)
 
     mark_only_lora_as_trainable(model, train_bias=cfg.train_bias)
 
@@ -379,18 +201,20 @@ def main():
 
     create_ckpt_func = functools.partial(create_lora_checkpoint, train_bias=cfg.train_bias)
 
-    torch_profiler = None
-    tb_writer = SummaryWriter(os.path.join(cfg.log_dir, cfg.model_type))
-    train_pbar = tqdm.tqdm(range(max_train_steps), colour='blue', desc='Training steps')
-    best_val_accuracy = 0.0
-    train_steps = 0
+    log_dir = os.path.join(cfg.log_dir, cfg.model_type)
+    ckpt_dir = os.path.join(cfg.ckpt_dir, cfg.model_type)
+    os.makedirs(log_dir, exist_ok=True)
+    os.makedirs(ckpt_dir, exist_ok=True)
 
-    os.makedirs(cfg.log_dir, exist_ok=True)
-    os.makedirs(cfg.ckpt_dir, exist_ok=True)
+    torch_profiler = None
+    tb_writer = SummaryWriter(log_dir)
+    train_pbar = tqdm.tqdm(range(max_train_steps), colour='blue', desc='Training steps')
+    best_val_loss = np.inf
+    train_steps = 0
 
     # Careful as the logs will grow very fast
     if cfg.use_profiler:
-        torch_profiler = create_trace_profiler(os.path.join(cfg.log_dir, 'profile_traces'))
+        torch_profiler = create_trace_profiler(os.path.join(cfg.log_dir, f'{cfg.model_type}_profile_traces'))
 
     train_tracker = StatsTracker()
     val_tracker = StatsTracker()
@@ -424,7 +248,7 @@ def main():
 
                 # regular checkpointing
                 if cfg.ckpt_interval > 0 and (train_steps % cfg.ckpt_interval == 0 or train_steps == max_train_steps):
-                    create_ckpt_func(model=model, full_path=os.path.join(cfg.ckpt_dir, f'lora_{cfg.model_type}-steps-{train_steps}.pth'))
+                    create_ckpt_func(model=model, full_path=os.path.join(ckpt_dir, f'lora_{cfg.model_type}-steps-{train_steps}.pth'))
 
                 # validation steps
                 if cfg.val_steps > 0 and (cfg.val_interval > 0 and train_steps % cfg.val_interval == 0 or train_steps == max_train_steps):
@@ -436,16 +260,13 @@ def main():
                     log_statistics(tb_writer, train_steps, val_stats, False)
 
                     # save best model
-                    if val_stats['accuracy'] > best_val_accuracy:
-                        best_val_accuracy = val_stats['accuracy']
-                        logger.info(f'New best validation accuracy: {val_stats["accuracy"]:.4f}')
-                        create_ckpt_func(model=model, full_path=os.path.join(cfg.ckpt_dir, f'lora_{cfg.model_type}-best.pth'))
+                    if val_stats['loss'] < best_val_loss:
+                        best_val_loss = val_stats['loss']
+                        logger.info(f'New best validation loss: {best_val_loss:.4f}')
+                        create_ckpt_func(model=model, full_path=os.path.join(ckpt_dir, f'lora_{cfg.model_type}-best.pth'))
 
     # create a final checkpoint
-    create_ckpt_func(model=model, full_path=os.path.join(cfg.ckpt_dir, f'lora_{cfg.model_type}-steps-{train_steps}.pth'))
-
-    # show some training stats.
-    logger.info(f'CUDA Memory Summary After Last training:\n{torch.cuda.memory_summary()}')
+    create_ckpt_func(model=model, full_path=os.path.join(ckpt_dir, f'lora_{cfg.model_type}-steps-{train_steps}.pth'))
 
 
 if __name__ == '__main__':

@@ -11,6 +11,7 @@ from typing import Optional, Tuple
 
 from instruct_llama.models.model import Transformer
 from instruct_llama.models.lora import lora_state_dict
+from instruct_llama.core.rl_ppo import PPOAgent
 from instruct_llama.utils.fsdp_checkpoint import save_full_state_model_checkpoint
 from instruct_llama.utils.normalizer import BaseNormalizer
 
@@ -67,3 +68,9 @@ def create_normalizer_checkpoint(norm: BaseNormalizer, full_path: str) -> None:
     _check_file_path(full_path)
     torch.save(norm.state_dict(), full_path)
     logger.info(f'Normalizer checkpoint saved at {full_path!r}')
+
+
+def create_agent_checkpoint(agent: PPOAgent, full_path: str) -> None:
+    _check_file_path(full_path)
+    torch.save(agent.state_dict(), full_path)
+    logger.info(f'Agent checkpoint saved at {full_path!r}')

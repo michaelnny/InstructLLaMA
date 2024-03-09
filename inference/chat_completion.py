@@ -118,7 +118,7 @@ These are just a few of the many attractions that Paris has to offer. With so mu
 if __name__ == '__main__':
     main(
         # ckpt_path="/home/michael/models/meta_llama2/llama-2-7b-chat/consolidated.pth",  # Meta chat model
-        # ckpt_path='./checkpoints/merged/7B-sft-steps-6000.pth',  # our fine-tuned chat model
-        ckpt_path='./checkpoints/rlhf/policy/7B-epoch-40.pth',  # our RLHF trained chat model
+        ckpt_path='./checkpoints/best/sft/lora_7B-steps-3500.pth',  # our fine-tuned chat model
+        # ckpt_path='./checkpoints/rlhf/policy/7B-epoch-40.pth',  # our RLHF trained chat model
         tokenizer_path='/home/michael/models/meta_llama2/tokenizer.model',
     )

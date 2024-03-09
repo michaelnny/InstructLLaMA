@@ -146,6 +146,7 @@ class FeedForward(llama.FeedForward):
         hidden_dim: int,
         multiple_of: int,
         ffn_dim_multiplier: Optional[float],
+        resid_dropout: Optional[float],
         args: LoraModelArgs,
     ):
         nn.Module.__init__(self)
@@ -160,6 +161,9 @@ class FeedForward(llama.FeedForward):
         self.w1 = layer_cls(dim, hidden_dim, bias=False)
         self.w2 = layer_cls(hidden_dim, dim, bias=False)
         self.w3 = layer_cls(dim, hidden_dim, bias=False)
+
+        # regularization
+        self.resid_dropout = nn.Dropout(resid_dropout) if resid_dropout > 0 else nn.Identity()
 
 
 class TransformerBlock(llama.TransformerBlock):
@@ -176,6 +180,7 @@ class TransformerBlock(llama.TransformerBlock):
             hidden_dim=4 * args.dim,
             multiple_of=args.multiple_of,
             ffn_dim_multiplier=args.ffn_dim_multiplier,
+            resid_dropout=args.resid_dropout,
             args=args,
         )
         self.attention_norm = llama.RMSNorm(args.dim, eps=args.norm_eps)
@@ -190,7 +195,8 @@ class Transformer(llama.Transformer):
         self.n_layers = params.n_layers
 
         self.token_embeddings = nn.Embedding(params.vocab_size, params.dim)
-        self.embeddings_dropout = nn.Dropout(params.embed_dropout) if params.embed_dropout > 0 else nn.Identity()
+        self.embed_dropout = nn.Dropout(params.embed_dropout) if params.embed_dropout > 0 else nn.Identity()
+        self.head_dropout = nn.Dropout(params.head_dropout) if params.head_dropout > 0 else nn.Identity()
 
         self.layers: Iterable[TransformerBlock] = torch.nn.ModuleList()
         for layer_id in range(params.n_layers):
@@ -204,10 +210,10 @@ class Transformer(llama.Transformer):
             self.lm_head = head_layer_cls(params.dim, params.vocab_size, bias=False)
         elif self.params.head_type == 'scalar_head':
             logger.info('Creating LLaMA-2 model with scalar head ...')
-            self.scalar_head = head_layer_cls(params.dim, 1, bias=True)
-        elif self.params.head_type == 'dual_head':  # policy model with an additional value head
+            self.scalar_head = head_layer_cls(params.dim, 1, bias=False)
+        elif self.params.head_type == 'dual_head':
             logger.info('Creating LLaMA-2 model with LM and scalar heads ...')
             self.lm_head = head_layer_cls(params.dim, params.vocab_size, bias=False)
-            self.scalar_head = head_layer_cls(params.dim, 1, bias=True)
+            self.scalar_head = head_layer_cls(params.dim, 1, bias=False)
 
         self.freqs_cis = llama.precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.max_seq_len * 2)

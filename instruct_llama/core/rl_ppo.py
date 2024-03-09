@@ -2,8 +2,9 @@
 # This project is released under the MIT License.
 # See the accompanying LICENSE file for details.
 
-from typing import Tuple, Optional, List, Mapping, Dict, Text, Any
+from typing import Tuple, Optional, List, Mapping, Text, Any
 import time
+import os
 import numpy as np
 import torch
 from torch.nn import functional as F
@@ -184,6 +185,7 @@ class PPOAgent:
         policy_device: str = 'cuda',
         value_device: str = 'cuda',
         ptx_loader: DataLoader = None,
+        reward_normalizer_ckpt: str = None,
         tb_writer: SummaryWriter = None,
     ):
         """
@@ -210,7 +212,7 @@ class PPOAgent:
             policy_grad_clip: gradient clip value for PPO policy model.
             value_grad_clip: gradient clip value for PPO value model.
             truncate_token: looking for first occurrence of special token text like `[INST]` in the response sequence.
-            truncate_penalty_value: add a negative reward for the truncated tokens in the response sequence.
+            truncate_penalty_value: replace rewards with a fixed (negative) value as penalties to truncated tokens in the response.
             kl_ctl: an instance of the AdaptiveKLController.
             scale_kl: is true, remove negative KL and scale into [0, 1], so the coefficient always have the same meaning.
             whiten_rewards: if true, whiten rewards (combined with penalties) before using it to compute GAE advantages and returns.
@@ -221,6 +223,8 @@ class PPOAgent:
             policy_device: device for the PPO policy model.
             value_device: device for the PPO value model.
             ptx_loader: pre-training dataset loader, required if `ptx_coef > 0`.
+            reward_normalizer_ckpt: checkpoint for the reward normalizer,
+                if not provided, will compute running statistics for reward normalizer.
             tb_writer: tensorboard summary writer.
         """
 
@@ -243,10 +247,6 @@ class PPOAgent:
             assert isinstance(truncate_token, Tuple), truncate_token
             assert all(isinstance(t, str) for t in truncate_token), truncate_token
         assert truncate_penalty_value <= 0, truncate_penalty_value
-
-        if whiten_rewards or whiten_advantages:
-            assert policy_micro_bs >= 2, policy_micro_bs
-            assert value_micro_bs >= 2, value_micro_bs
 
         self.tokenizer = tokenizer
         self.ptx_loader = ptx_loader
@@ -298,12 +298,19 @@ class PPOAgent:
 
         # normalize reward model output to have zero mean
         self.reward_normalizer = Normalizer(target_mean=0.0, target_std=1.0)
+        self.update_reward_normalizer = True
+        if reward_normalizer_ckpt is not None and os.path.exists(reward_normalizer_ckpt):
+            norm_state = torch.load(reward_normalizer_ckpt)
+            self.reward_normalizer.load_state_dict(norm_state)
+            print(f'Reward normalizer state:\n{self.reward_normalizer.state_dict()}')
+            self.update_reward_normalizer = False
 
         # store generated episodes for training
         self.buffer = []
 
         self.tb_writer = tb_writer
         # counters
+        self.c_iteration = 0
         self.c_policy_update = 0
         self.c_value_update = 0
         self.c_train_episode = 0
@@ -343,7 +350,6 @@ class PPOAgent:
     @torch.no_grad()
     def run_selfplay(
         self,
-        epoch: int,
         dataset: PromptOnlyDataset,
         num_episodes: int,
         batch_size: int,
@@ -358,7 +364,6 @@ class PPOAgent:
     ) -> None:
         """
         Arguments:
-            epoch: current epoch
             dataset: a PromptOnlyDataset
             num_episodes: number of episodes to generate
             batch_size: batch size during selfplay generation
@@ -411,7 +416,7 @@ class PPOAgent:
 
         # we do it in separate steps at the end of the epoch, so we can allocate one model at the time when using a single GPU
         self.swap_model_device('reward', False)
-        self.compute_scalar_reward_for_batched_episodes(batched_episodes)
+        self.compute_environment_reward_for_batched_episodes(batched_episodes)
 
         if self.reward_device == self.policy_device or self.reward_device == self.value_device or self.reward_device == self.ref_device:
             self.swap_model_device('reward', True)
@@ -427,10 +432,8 @@ class PPOAgent:
             if self.ref_device == self.policy_device or self.ref_device == self.value_device:
                 self.swap_model_device('reference', True)
 
-            self.compute_penalized_reward_for_batched_episodes(batched_episodes, is_training)
-
         episodes = self.flatten_batched_episodes(batched_episodes)
-        self.log_selfplay_episode_stats(epoch, episodes, log_interval, sample_interval, is_training)
+        self.log_selfplay_episode_stats(episodes, log_interval, sample_interval, is_training)
 
         if is_training:
             self.buffer = episodes
@@ -531,7 +534,7 @@ class PPOAgent:
             if end_idx > start_idx and end_idx < total_len:
                 terminal_steps[i] = end_idx
 
-            # looking for special tokens like '[INST]' and something alike, so we can later add a penalty score
+            # looking for special tokens like '[INST]' and something alike, so we can later add a penalty value
             if self.apply_truncate_penalty:
                 truncate_idx = 0
                 for truncate_token in self.truncate_token:
@@ -555,8 +558,8 @@ class PPOAgent:
             terminal_steps = terminal_steps[valid_episodes]
             truncate_steps = truncate_steps[valid_episodes]
 
-        # build up loss mask
-        # for example, if we have a sequence of:
+        # build up loss mask, this mask is aligned with the target
+        # for example, if we have a sequence of tokens:
         # [1, 2, 3, 4, 5, 6, 7, -1, -1]
         # where:
         #   [1, 2, 3, 4] are prompt tokens
@@ -566,8 +569,13 @@ class PPOAgent:
         # then the mask will be:
         # [False, False, False, True, True, True, False, False, False]
         mask = torch.zeros_like(tokens, dtype=torch.bool, device='cpu')
-        for i, (start_idx, end_idx) in enumerate(zip(start_steps.tolist(), terminal_steps.tolist())):
-            mask[i, start_idx:end_idx] = True
+
+        # a mask for truncate tokens in the response sequence
+        truncate_mask = torch.zeros_like(tokens, dtype=torch.bool, device='cpu')
+        for i, (start_t, end_t, truncate_t) in enumerate(zip(start_steps.tolist(), terminal_steps.tolist(), truncate_steps.tolist())):
+            mask[i, start_t:end_t] = True
+            if truncate_t > 0 and truncate_t < end_t:
+                truncate_mask[i, truncate_idx:end_t] = True
 
         # replace pad ids
         tokens = torch.where(tokens == pad_id, eos_id, tokens)
@@ -584,16 +592,21 @@ class PPOAgent:
         torch.cuda.empty_cache()
         pi_logits = self.policy_model(tokens).cpu()
         logprobs = compute_logprobs_from_logits(pi_logits, actions)
+        entropies = compute_entropy_from_logits(pi_logits)
 
+        mean_time = torch.tensor((t1 - t0) / len(terminal_steps))
         episodes = {
             'tokens': tokens.cpu(),  # states s_t
             'actions': actions.cpu(),  # actions a_t
             'logprobs': logprobs.cpu(),  # log probabilities for actions logprob_a_t
             'mask': mask.cpu(),
+            'truncate_mask': truncate_mask.cpu(),
+            'entropies': entropies.cpu(),
             'start_steps': start_steps.cpu(),
             'terminal_steps': terminal_steps.cpu(),
             'truncate_steps': truncate_steps.cpu(),
-            'episode_time': (t1 - t0) / len(terminal_steps),
+            'episode_steps': (terminal_steps - start_steps).cpu(),
+            'episode_time': mean_time.cpu(),
         }
 
         return episodes
@@ -603,36 +616,36 @@ class PPOAgent:
 
         for episodes in batched_episodes:
             tokens = episodes['tokens'].to(self.value_device)
-            mask = episodes['mask']
 
             t0 = time.time()
             values = self.value_model(tokens).squeeze(-1).cpu()  # [batch_size, seq_len]
-            values *= mask.float()
+
             episodes['values'] = values
             episodes['episode_time'] += (time.time() - t0) / len(tokens)
 
     @torch.no_grad()
-    def compute_scalar_reward_for_batched_episodes(self, batched_episodes: List[Mapping[Text, torch.Tensor]]):
+    def compute_environment_reward_for_batched_episodes(self, batched_episodes: List[Mapping[Text, torch.Tensor]]):
 
         for episodes in batched_episodes:
             tokens = episodes['tokens']
             terminal_steps = episodes['terminal_steps']
 
-            if len(terminal_steps) < 2:
-                raise ValueError(f'Please increase batch size, current batch size is {len(terminal_steps)}')
-
             t0 = time.time()
-            scalar_rewards = self.compute_scalar_reward(tokens, terminal_steps).cpu()  # [batch_size]
-            self.reward_normalizer.update(scalar_rewards)
+
+            scalar_rewards = self.compute_environment_reward(tokens, terminal_steps).cpu()  # [batch_size]
+            if self.update_reward_normalizer:
+                self.reward_normalizer.update(scalar_rewards)
             scalar_rewards = self.reward_normalizer.normalize(scalar_rewards)
 
             if self.clip_reward > 0:
                 scalar_rewards = torch.clamp(scalar_rewards, min=-self.clip_reward, max=self.clip_reward)
 
-            # RM model reward are zero except for terminal step
+            # environment rewards are zero except for terminal step
             rewards = torch.zeros_like(tokens, dtype=torch.float, device='cpu')
+
             # shift one step to left because final reward is for state-action pair (s_T-1, a_T-1)
-            # this also aligns with the rest of transition tuple (s_t, a_t, logprob_a_t, v_t)
+            # which is the time step prior reaching the EOS token
+            # this also aligns with the rest of transition tuple (s_t, a_t, logprob_a_t, v_t, r_t)
             rewards[torch.arange(len(terminal_steps)), terminal_steps - 1] = scalar_rewards.clone()
 
             episodes['rewards'] = rewards.cpu()
@@ -649,60 +662,15 @@ class PPOAgent:
             mask = episodes['mask']
 
             t0 = time.time()
-            kl = self.compute_kl_penalties(tokens, actions, logprobs).cpu()  # [batch_size, seqlen]
+            ref_logprobs = self.compute_logprobs_from_reference_model(tokens, actions, logprobs).cpu()  # [batch_size, seqlen]
+            kl = logprobs - ref_logprobs
             kl *= mask.float()
             episodes['kl'] = kl
+            episodes['ref_logprobs'] = ref_logprobs
             episodes['episode_time'] += (time.time() - t0) / len(tokens)
 
     @torch.no_grad()
-    def compute_penalized_reward_for_batched_episodes(self, batched_episodes: List[Mapping[Text, torch.Tensor]], is_training: bool = False):
-
-        for episodes in batched_episodes:
-            terminal_steps = episodes['terminal_steps']
-            truncate_steps = episodes['truncate_steps']
-            rewards = episodes['rewards']
-            mask = episodes['mask']
-            kl = episodes['kl']
-
-            t0 = time.time()
-
-            # # Replace KL values too small with zero
-            # res_kl_abs = torch.abs(kl[mask].flatten()).cpu().numpy()
-            # # Compute the threshold value using percentile-based method
-            # kl_threshold = np.percentile(res_kl_abs, 2)
-            # kl = torch.where(torch.abs(kl) >= kl_threshold, kl, 0.0)
-
-            # Scale KL to [0, 1], so the coefficient always have the same meaning
-            # as the raw KL values are very small, often in 9e-5 to 9e-7
-            # TODO: maybe should move this to `get_batched_transitions`
-            if self.scale_kl:
-                # replace negative KLs with zero, as scaling may mess up the signs
-                # this may also help prevent the agent try to 'gain' negative KL as reward signal, instead of the signal from the reward model???
-                kl = torch.where(kl < 0, 0, kl)
-                kl[mask] = scale_data(kl[mask], target_min=0.0, target_max=1.0)
-
-            # add pre-token KL penalties for the response tokens
-            kl_penalties = -self.kl_ctl.value * kl
-            kl_penalties *= mask.float()
-            rewards += kl_penalties
-
-            # add penalties to truncated tokens in the response
-            if self.apply_truncate_penalty:
-                truncate_masks = torch.zeros_like(rewards, dtype=torch.bool, device='cpu')
-                for i, (t, end_t) in enumerate(zip(truncate_steps.tolist(), terminal_steps.tolist())):
-                    if t > 0:
-                        truncate_masks[i, t:end_t] = True
-                truncate_penalties = truncate_masks.float() * self.truncate_penalty_value
-                rewards = torch.where(truncate_masks, self.truncate_penalty_value, rewards)
-                episodes['truncate_penalties'] = truncate_penalties.cpu()
-
-            episodes['rewards'] = rewards.cpu()
-            episodes['kl_penalties'] = kl_penalties.cpu()
-            episodes['kl_coef'] = self.kl_ctl.value
-            episodes['episode_time'] += (time.time() - t0) / len(rewards)
-
-    @torch.no_grad()
-    def compute_scalar_reward(self, tokens: torch.Tensor, terminal_steps: torch.Tensor) -> torch.Tensor:
+    def compute_environment_reward(self, tokens: torch.Tensor, terminal_steps: torch.Tensor) -> torch.Tensor:
         """Returns the environment rewards for the given batch of prompt-completion pairs"""
 
         assert len(tokens) == len(terminal_steps)
@@ -716,12 +684,11 @@ class PPOAgent:
 
         # get rewards for terminal step, where sequence ends with EOS token, or reached maximum seq_length
         env_rewards = torch.gather(outputs, dim=1, index=terminal_steps.unsqueeze(-1)).squeeze(1)  # [batch_size]
-
         return env_rewards
 
     @torch.no_grad()
-    def compute_kl_penalties(self, tokens: torch.Tensor, actions: torch.Tensor, logprobs: torch.Tensor) -> torch.Tensor:
-        """Returns the pre-token (completion only) KL penalties for the given batch of prompt-completion pairs"""
+    def compute_logprobs_from_reference_model(self, tokens: torch.Tensor, actions: torch.Tensor, logprobs: torch.Tensor) -> torch.Tensor:
+        """Returns the log probabilities using the reference model for the given batch of prompt-completion pairs"""
 
         assert len(tokens) == len(logprobs) == len(actions)
         assert len(tokens.shape) == len(logprobs.shape) == len(actions.shape) == 2
@@ -732,38 +699,34 @@ class PPOAgent:
 
         ref_logits = self.ref_model(tokens)  # [batch_size, seq_len, vocab_size]
         ref_logprobs = compute_logprobs_from_logits(ref_logits, actions)
-        kl = logprobs - ref_logprobs
-        return kl
+        return ref_logprobs
 
     def flatten_batched_episodes(self, batched_episodes: List[Mapping[Text, torch.Tensor]]) -> List[Mapping[Text, torch.Tensor]]:
         """Turn a list of batched episodes into a flat list of episodes"""
         results = []
         for episodes in batched_episodes:  # for each batch
             for i in range(len(episodes['terminal_steps'])):  # for each episode in current batch
-                end = episodes['terminal_steps'][i]
+                end_t = episodes['terminal_steps'][i]
                 episode = {
-                    'tokens': episodes['tokens'][i, :end].clone(),
-                    'actions': episodes['actions'][i, :end].clone(),
-                    'logprobs': episodes['logprobs'][i, :end].clone(),
-                    'mask': episodes['mask'][i, :end].clone(),
-                    'rewards': episodes['rewards'][i, :end].clone(),  # rewards with penalties
-                    'scalar_reward': episodes['scalar_rewards'][i].clone(),  # normalized reward from reward model
+                    'tokens': episodes['tokens'][i, :end_t],
+                    'actions': episodes['actions'][i, :end_t],
+                    'logprobs': episodes['logprobs'][i, :end_t],
+                    'mask': episodes['mask'][i, :end_t],
+                    'truncate_mask': episodes['truncate_mask'][i, :end_t],
+                    'entropies': episodes['entropies'][i, :end_t],
+                    'rewards': episodes['rewards'][i, :end_t],
+                    'scalar_reward': episodes['scalar_rewards'][i],
+                    'episode_steps': episodes['episode_steps'][i],
                     'episode_time': episodes['episode_time'],
-                    'start_step': episodes['start_steps'][i],
-                    'terminal_step': end,
-                    'truncate_step': episodes['truncate_steps'][i],
+                    'start_steps': episodes['start_steps'][i],
+                    'terminal_steps': end_t,
+                    'truncate_steps': episodes['truncate_steps'][i],
                 }
 
                 # only training episodes have these data
-                if 'values' in episodes:
-                    episode['values'] = episodes['values'][i, :end].clone()
-                if 'kl' in episodes:
-                    episode['kl'] = episodes['kl'][i, :end].clone()
-                    episode['kl_penalties'] = episodes['kl_penalties'][i, :end].clone()
-                    episode['kl_coef'] = episodes['kl_coef']
-
-                if 'truncate_penalties' in episodes:
-                    episode['truncate_penalties'] = episodes['truncate_penalties'][i, :end].clone()
+                for k in ('values', 'kl', 'ref_logprobs'):
+                    if k in episodes:
+                        episode[k] = episodes[k][i, :end_t]
 
                 results.append(episode)
 
@@ -796,39 +759,54 @@ class PPOAgent:
         return return_t, adv_t
 
     @torch.no_grad()
-    def get_batched_transitions(self, batch: List[Mapping[Text, torch.Tensor]]) -> Mapping[Text, torch.Tensor]:
-        """Essentially the same as a regular custom collate function for dataloader, except here we also compute GAE advantages for the batch"""
-        batch_size = len(batch)
-        max_batch_len = max([len(item['tokens']) for item in batch])
+    def prepare_ppo_transitions(self) -> None:
+        """Compute penalized rewards and GAE advantages for all episodes in current iteration"""
+        batch_size = len(self.buffer)
 
-        max_batch_len = self.model_params.max_seq_len
-        eos_id = self.tokenizer.eos_id
+        if batch_size < 8:
+            raise ValueError(f'Please increase rollout size, current size is {batch_size}')
 
-        batched_tokens = torch.full((batch_size, max_batch_len), eos_id, dtype=torch.long)
-        batched_actions = torch.full((batch_size, max_batch_len), eos_id, dtype=torch.long)
-        batched_logprobs = torch.full((batch_size, max_batch_len), 0.0, dtype=torch.float)
-        batched_rewards = torch.full((batch_size, max_batch_len), 0.0, dtype=torch.float)
-        batched_values = torch.full((batch_size, max_batch_len), 0.0, dtype=torch.float)
-        batched_returns = torch.full((batch_size, max_batch_len), 0.0, dtype=torch.float)
-        batched_advantages = torch.full((batch_size, max_batch_len), 0.0, dtype=torch.float)
-        batched_mask = torch.full((batch_size, max_batch_len), 0, dtype=torch.bool)
+        max_seq_len = max([len(item['tokens']) for item in self.buffer])
+        batched_kl = torch.full((batch_size, max_seq_len), 0.0, dtype=torch.float)
+        batched_rewards = torch.full((batch_size, max_seq_len), 0.0, dtype=torch.float)
+        batched_values = torch.full((batch_size, max_seq_len), 0.0, dtype=torch.float)
+        batched_returns = torch.full((batch_size, max_seq_len), 0.0, dtype=torch.float)
+        batched_advantages = torch.full((batch_size, max_seq_len), 0.0, dtype=torch.float)
+        batched_mask = torch.full((batch_size, max_seq_len), 0, dtype=torch.bool)
+        batched_truncate_mask = torch.full((batch_size, max_seq_len), 0, dtype=torch.bool)
 
-        for i, item in enumerate(batch):
+        for i, item in enumerate(self.buffer):
             seq_len = len(item['tokens'])
-            batched_tokens[i, :seq_len] = item['tokens'].clone()
-            batched_actions[i, :seq_len] = item['actions'].clone()
-            batched_logprobs[i, :seq_len] = item['logprobs'].clone()
-            batched_values[i, :seq_len] = item['values'].clone()
-            batched_rewards[i, :seq_len] = item['rewards'].clone()
-            batched_mask[i, :seq_len] = item['mask'].clone()
+            batched_kl[i, :seq_len] = item['kl']
+            batched_rewards[i, :seq_len] = item['rewards']
+            batched_values[i, :seq_len] = item['values']
+            batched_mask[i, :seq_len] = item['mask']
+            batched_truncate_mask[i, :seq_len] = item['truncate_mask']
+
+        # Scale KL to [0, 1], so the coefficient always have the same meaning
+        # as the raw KL values are very small, often in 9e-5 to 9e-7
+        if self.scale_kl:
+            # replace negative KLs with zero, as scaling may mess up the signs
+            # this may also help prevent the agent try to 'gain' negative KL as reward signal, instead of the signal from the reward model???
+            batched_kl = torch.where(batched_kl < 0, 0, batched_kl)
+            batched_kl[batched_mask] = scale_data(batched_kl[batched_mask], target_min=0.0, target_max=1.0)
+
+        # add pre-token KL penalties for the response tokens
+        batched_kl_penalties = -self.kl_ctl.value * batched_kl
+        batched_kl_penalties *= batched_mask.float()
+        batched_rewards += batched_kl_penalties
+
+        # replace rewards with a fixed (negative) value as penalties to truncated tokens in the response
+        if self.apply_truncate_penalty:
+            batched_rewards = torch.where(batched_truncate_mask, self.truncate_penalty_value, batched_rewards)
 
         if self.whiten_rewards:
             batched_rewards = masked_whiten(batched_rewards, batched_mask, shift_mean=False)
 
         # compute GAE advantages one episode at a time
-        for i, item in enumerate(batch):
-            start_t = item['start_step']
-            end_t = item['terminal_step']
+        for i, item in enumerate(self.buffer):
+            start_t = item['start_steps']
+            end_t = item['terminal_steps']
             # here rewards, values with slice `start_t:end_t` are from t=0, 1, ..., T-2, T-1
             returns, advantages = self.compute_returns_and_advantages(batched_values[i, start_t:end_t], batched_rewards[i, start_t:end_t])
             batched_returns[i, start_t:end_t] = returns
@@ -836,6 +814,59 @@ class PPOAgent:
 
         if self.whiten_advantages:
             batched_advantages = masked_whiten(batched_advantages, batched_mask, shift_mean=True)
+
+        # now add those returns and advantages back to the items in the buffer
+        for i, item in enumerate(self.buffer):
+            end_t = item['terminal_steps']
+            item['returns'] = batched_returns[i, :end_t]
+            item['advantages'] = batched_advantages[i, :end_t]
+            item['kl_penalties'] = batched_kl_penalties[i, :end_t]
+            item['truncate_penalties'] = batched_truncate_mask[i, :end_t].float() * self.truncate_penalty_value
+
+    @torch.no_grad()
+    def get_batched_transitions(self, batch: List[Mapping[Text, torch.Tensor]]) -> Mapping[Text, torch.Tensor]:
+        """Essentially the same as a regular custom collate function for dataloader"""
+        batch_size = len(batch)
+        max_seq_len = max([len(item['tokens']) for item in batch])
+
+        eos_id = self.tokenizer.eos_id
+
+        batched_tokens = torch.full((batch_size, max_seq_len), eos_id, dtype=torch.long)
+        batched_actions = torch.full((batch_size, max_seq_len), eos_id, dtype=torch.long)
+        batched_logprobs = torch.zeros((batch_size, max_seq_len), dtype=torch.float)
+        batched_values = torch.zeros((batch_size, max_seq_len), dtype=torch.float)
+        batched_returns = torch.zeros((batch_size, max_seq_len), dtype=torch.float)
+        batched_advantages = torch.zeros((batch_size, max_seq_len), dtype=torch.float)
+        batched_mask = torch.zeros((batch_size, max_seq_len), dtype=torch.bool)
+
+        # the following are for logging
+        batched_episode_steps = torch.zeros((batch_size,), dtype=torch.float)
+        batched_episode_times = torch.zeros((batch_size,), dtype=torch.float)
+        batched_scalar_rewards = torch.zeros((batch_size,), dtype=torch.float)
+        batched_rewards = torch.zeros((batch_size, max_seq_len), dtype=torch.float)
+        batched_entropies = torch.zeros((batch_size, max_seq_len), dtype=torch.float)
+        batched_kl = torch.zeros((batch_size, max_seq_len), dtype=torch.float)
+        batched_kl_penalties = torch.zeros((batch_size, max_seq_len), dtype=torch.float)
+        batched_truncate_penalties = torch.zeros((batch_size, max_seq_len), dtype=torch.float)
+
+        for i, item in enumerate(batch):
+            seq_len = len(item['tokens'])
+            batched_tokens[i, :seq_len] = item['tokens'].clone()
+            batched_actions[i, :seq_len] = item['actions'].clone()
+            batched_logprobs[i, :seq_len] = item['logprobs'].clone()
+            batched_values[i, :seq_len] = item['values'].clone()
+            batched_returns[i, :seq_len] = item['returns'].clone()
+            batched_advantages[i, :seq_len] = item['advantages'].clone()
+            batched_mask[i, :seq_len] = item['mask'].clone()
+
+            batched_episode_steps[i] = item['episode_steps'].clone()
+            batched_episode_times[i] = item['episode_time'].clone()
+            batched_scalar_rewards[i] = item['scalar_reward'].clone()
+            batched_rewards[i, :seq_len] = item['rewards'].clone()
+            batched_entropies[i, :seq_len] = item['entropies'].clone()
+            batched_kl[i, :seq_len] = item['kl'].clone()
+            batched_kl_penalties[i, :seq_len] = item['kl_penalties'].clone()
+            batched_truncate_penalties[i, :seq_len] = item['truncate_penalties'].clone()
 
         return {
             'tokens': batched_tokens,
@@ -845,17 +876,29 @@ class PPOAgent:
             'returns': batched_returns,
             'advantages': batched_advantages,
             'mask': batched_mask,
+            # for logging
+            'episode_steps': batched_episode_steps,
+            'episode_time': batched_episode_times,
+            'scalar_reward': batched_scalar_rewards,
+            'rewards': batched_rewards,
+            'entropies': batched_entropies,
+            'kl': batched_kl,
+            'kl_penalties': batched_kl_penalties,
+            'truncate_penalties': batched_truncate_penalties,
         }
 
-    def run_ppo_training_steps(self, log_interval: int = 1) -> None:
+    def run_train(self, log_interval: int = 1) -> None:
         """
         Uses PPO and the RL agent generated selfplay episodes to train the policy network.
 
         Arguments:
+            iteration: current iteration
             log_interval: interval to log training statistics, measured in number of model updates.
         """
 
         assert len(self.buffer) > 0
+
+        t0 = time.time()
 
         # make room for policy model
         if self.reward_device == self.policy_device or self.reward_device == self.value_device:
@@ -867,6 +910,9 @@ class PPOAgent:
             self.swap_model_device('value', True)
             self.swap_optimizer_device('value', True)
 
+        # Compute GAE advantages once before starts training
+        self.prepare_ppo_transitions()
+
         # Run M epochs to update policy model
         # we use two loops because we can't host the two models at the same time with a single GPU
         self.policy_model.disable_cache()
@@ -875,14 +921,19 @@ class PPOAgent:
         self.policy_model.train()
         torch.cuda.empty_cache()
 
-        for _ in range(self.ppo_update_epochs):
+        def get_micro_batches(size: int) -> List[Mapping[Text, torch.Tensor]]:
             # Split episodes into micro batches
-            batch_indices = split_indices_into_bins(self.policy_micro_bs, len(self.buffer), shuffle=True, drop_last=True)
-            micro_batches = [self.get_batched_transitions([self.buffer[i] for i in indices]) for indices in batch_indices]
+            batch_indices = split_indices_into_bins(size, len(self.buffer), shuffle=True, drop_last=True)
+            results = [self.get_batched_transitions([self.buffer[i] for i in indices]) for indices in batch_indices]
+            return results
+
+        for _ in range(self.ppo_update_epochs):
+            # Dynamic batching can speed up training by ~20%
+            micro_batches = get_micro_batches(self.policy_micro_bs)
             for j in range(0, len(micro_batches), self.policy_accum_steps):
                 stats = self.update_policy_model(micro_batches[j : j + self.policy_accum_steps])
                 if self.c_policy_update % log_interval == 0:
-                    self.log_train_stats(stats, True)
+                    self.log_stats_to_tensorboard(stats, self.c_policy_update, 'ppo_policy')
 
         # make room for value model, we need the value model to compute state values during PPO transition preparation
         if self.policy_device == self.value_device:
@@ -897,22 +948,37 @@ class PPOAgent:
 
         # Run M epochs to update value model
         for _ in range(self.ppo_update_epochs):
-            # Split transitions into micro batches
-            batch_indices = split_indices_into_bins(self.value_micro_bs, len(self.buffer), shuffle=True, drop_last=True)
-            micro_batches = [self.get_batched_transitions([self.buffer[i] for i in indices]) for indices in batch_indices]
-
+            micro_batches = get_micro_batches(self.value_micro_bs)
             for j in range(0, len(micro_batches), self.value_accum_steps):
                 stats = self.update_value_model(micro_batches[j : j + self.value_accum_steps])
                 if self.c_value_update % log_interval == 0:
-                    self.log_train_stats(stats, False)
+                    self.log_stats_to_tensorboard(stats, self.c_value_update, 'ppo_value')
 
         if self.value_device == self.policy_device:
             self.swap_model_device('value', True)
             self.swap_optimizer_device('value', True)
 
+        t1 = time.time()
+        self.c_iteration += 1
+
+        # log aggregated statistics at the end of iteration
+        iter_stats = self.compute_iteration_stats_from_episodes(self.buffer)
+        iter_stats['objective/kl_coef'] = self.kl_ctl.value
+        iter_stats['elapsed/policy_updates'] = self.c_policy_update
+        iter_stats['elapsed/value_updates'] = self.c_value_update
+        iter_stats['elapsed/episodes'] = self.c_train_episode
+        iter_stats['elapsed/time'] += t1 - t0
+
+        # split into separate tags for better readabilities
+        def split_and_flatten_stats(stats_dict: Mapping[Text, Any], split_kw: str) -> Mapping[Text, Any]:
+            assert split_kw is not None
+            return {k.split('/')[1]: v for k, v in stats_dict.items() if split_kw in k and '/' in k}
+
+        self.log_stats_to_tensorboard(split_and_flatten_stats(iter_stats, 'objective'), self.c_iteration, 'iterations_objective')
+        self.log_stats_to_tensorboard(split_and_flatten_stats(iter_stats, 'elapsed'), self.c_iteration, 'iterations_elapsed')
+
         # Update adaptive KL controller
-        kl = torch.mean([d['kl'].sum() for d in self.buffer])
-        self.kl_ctl.update(kl.item(), len(self.buffer))
+        self.kl_ctl.update(iter_stats['objective/kl'], len(self.buffer))
 
         del self.buffer[:]
 
@@ -1020,11 +1086,11 @@ class PPOAgent:
         t1 = time.time()
         self.c_policy_update += 1
         # Average over accumulated steps
-        aggr_stats = {k: np.mean(v) for k, v in stats.items() if len(v) > 0}
-        aggr_stats['learning_rate'] = self.policy_optimizer.param_groups[0]['lr']
-        aggr_stats['grad_norm'] = pi_grad_norm.item()
-        aggr_stats['step_time'] = t1 - t0
-        return aggr_stats
+        step_stats = {k: np.mean(v) for k, v in stats.items() if len(v) > 0}
+        step_stats['learning_rate'] = self.policy_optimizer.param_groups[0]['lr']
+        step_stats['grad_norm'] = pi_grad_norm.item()
+        step_stats['step_time'] = t1 - t0
+        return step_stats
 
     def update_value_model(
         self,
@@ -1037,8 +1103,6 @@ class PPOAgent:
             'error': [],
             'loss': [],
             'clipfrac': [],
-            'values': [],
-            'returns': [],
         }
 
         t0 = time.time()
@@ -1074,8 +1138,6 @@ class PPOAgent:
 
             stats['loss'].append(vf_loss.detach().item())
             stats['error'].append(pred_error.detach().item())
-            stats['values'].append(values[mask].detach().flatten().cpu())
-            stats['returns'].append(returns[mask].detach().flatten().cpu())
 
             if self.value_clip_eps > 0:
                 clipfrac = masked_mean(torch.gt(vf_losses2, vf_losses1), mask)
@@ -1096,102 +1158,124 @@ class PPOAgent:
         t1 = time.time()
         self.c_value_update += 1
 
-        stats['values'] = torch.cat(stats['values']).cpu().tolist()
-        stats['returns'] = torch.cat(stats['returns']).cpu().tolist()
         # Average over accumulated steps
-        aggr_stats = {}
-        for k, v in stats.items():
-            if len(v) > 0:
-                if k in ('values', 'returns'):
-                    aggr_stats[f'{k}_mean'] = np.mean(v)
-                    aggr_stats[f'{k}_var'] = np.var(v)
-                else:
-                    aggr_stats[k] = np.mean(v)
+        step_stats = {k: np.mean(v) for k, v in stats.items() if len(v) > 0}
+        step_stats['learning_rate'] = self.value_optimizer.param_groups[0]['lr']
+        step_stats['grad_norm'] = value_grad_norm.item()
+        step_stats['step_time'] = t1 - t0
+        return step_stats
 
-        aggr_stats['learning_rate'] = self.value_optimizer.param_groups[0]['lr']
-        aggr_stats['grad_norm'] = value_grad_norm.item()
-        aggr_stats['step_time'] = t1 - t0
-        return aggr_stats
+    def compute_iteration_stats_from_episodes(self, episodes: List[Mapping[Text, torch.Tensor]]) -> Mapping[Text, float]:
+        """Aggregate statistics over the current iteration"""
+
+        batch = self.get_batched_transitions(episodes)
+        stats = {}
+        mask = batch['mask']
+
+        for k in ['values', 'returns']:
+            data = batch[k]
+            stats[f'objective/{k}_mean'] = masked_mean(data, mask).item()
+            stats[f'objective/{k}_var'] = masked_var(data, mask).item()
+
+        for k in ['rewards', 'kl', 'kl_penalties']:
+            data = torch.sum(batch[k] * mask.float(), dim=1)
+            stats[f'objective/{k}'] = data.mean().item()
+
+        # add more statistics
+        stats['objective/scalar_reward'] = torch.mean(batch['scalar_reward']).item()
+        stats['objective/entropy'] = masked_mean(batch['entropies'], mask).item()
+        stats['elapsed/episode_steps'] = torch.mean(batch['episode_steps']).item()
+        stats['elapsed/time'] = torch.sum(batch['episode_time']).item()
+        return stats
 
     def log_selfplay_episode_stats(
         self,
-        epoch: int,
         episodes: List[Mapping[Text, torch.Tensor]],
         log_interval: int,
         sample_interval: int,
         is_training: bool = False,
     ) -> Tuple[List[Mapping[Text, Any]], Mapping[Text, Any]]:
-        tb_prefix = 'train_episodes' if is_training else 'val_episodes'
+        """Log episode statistics and generated text to tensorboard"""
 
-        stats_list = []
+        tb_tag = 'train_episodes' if is_training else 'val_episodes'
         for episode in episodes:
             mask = episode['mask']
             stats = {
-                'episode_steps': (episode['terminal_step'] - episode['start_step']).item(),
+                'episode_steps': episode['episode_steps'].item(),
                 'scalar_reward': episode['scalar_reward'].item(),  # normalized reward from reward model
-                'episode_time': episode['episode_time'],
+                'episode_time': episode['episode_time'].item(),
             }
 
             if 'kl' in episode:
-                stats['kl_coef'] = episode['kl_coef']
-                kl = episode['kl'] * mask.float()
-                stats['kl'] = torch.sum(kl).item()
-                stats['kl_penalties'] = masked_sum(episode['kl_penalties'], mask).item()
-                stats['total_rewards'] = masked_sum(episode['rewards'], mask).item()  # rewards with penalties
-
-            if 'truncate_penalties' in episode:
-                stats['truncate_penalties'] = masked_sum(episode['truncate_penalties'], mask).item()
-
-            stats_list.append(stats)
+                stats['kl'] = masked_sum(episode['kl'], mask).item()
 
             if is_training:
                 self.c_train_episode += 1
-                episode_count = self.c_train_episode
             else:
                 self.c_val_episode += 1
-                episode_count = self.c_val_episode
 
-            if self.tb_writer:
-                if episode_count % log_interval == 0:
-                    for k, v in stats.items():
-                        if isinstance(v, (int, float)):
-                            self.tb_writer.add_scalar(f'{tb_prefix}/{k}', v, episode_count)
+            episode_count = self.c_train_episode if is_training else self.c_val_episode
 
-                # sample generated text
-                if episode_count % sample_interval == 0:
-                    prompt_tokens = episode['tokens'][: episode['start_step'] + 1].tolist()
-                    response_tokens = episode['tokens'][episode['start_step'] + 1 : episode['terminal_step'] + 1].tolist()
-                    prompt_text = self.tokenizer.decode(prompt_tokens)
-                    response_text = self.tokenizer.decode(response_tokens)
+            if episode_count % log_interval == 0:
+                self.log_stats_to_tensorboard(stats, episode_count, tb_tag)
 
-                    # Works better when enable 'MarkDown' in tensorboard
-                    self.tb_writer.add_text(
-                        f'{tb_prefix}_sample',
-                        f"**Prompt**: {prompt_text}   <br><br>**Response**: {response_text}   <br><br>**Reward**: {stats['scalar_reward']:.2f}",
-                        episode_count,
-                    )
+            # sample generated text
+            if episode_count % sample_interval == 0:
+                start_t = episode['start_steps']
+                prompt_tokens = episode['tokens'][: start_t + 1].tolist()
+                response_tokens = episode['actions'][start_t:].tolist()
+                prompt_text = self.tokenizer.decode(prompt_tokens)
+                response_text = self.tokenizer.decode(response_tokens)
 
-        # aggregate over epoch
-        aggr_keys = stats_list[0].keys()
-        epoch_stats = {}
-        for k in aggr_keys:
-            items = [d[k] for d in stats_list]
-            if k in ('scalar_reward', 'total_rewards', 'kl', 'kl_penalties', 'truncate_penalties'):
-                epoch_stats[f'{k}_mean'] = np.mean(items)
-                epoch_stats[f'{k}_var'] = np.var(items)
-            else:
-                epoch_stats[k] = np.mean(items)
+                # Works better when enable 'MarkDown' in tensorboard
+                formatted_text = f"**Prompt**: {prompt_text}   <br><br>**Response**: {response_text}   <br><br>**Reward**: {stats['scalar_reward']:.2f}"
+                formatted_text = f"{formatted_text}   <br><br>**KL**: {stats['kl']:.2f}" if 'kl' in stats else formatted_text
+                self.log_text_to_tensorboard(formatted_text, episode_count, f'{tb_tag}_sample')
 
-        epoch_tb_prefix = 'train_epochs' if is_training else 'val_epochs'
-        if self.tb_writer:
-            for k, v in epoch_stats.items():
-                if isinstance(v, (int, float)):
-                    self.tb_writer.add_scalar(f'{epoch_tb_prefix}/{k}', v, epoch)
+    def log_text_to_tensorboard(self, text: str, step: int, tag: str) -> None:
+        assert text is not None
+        assert tag is not None
+        assert step >= 1
 
-    def log_train_stats(self, stats: Dict[Text, Any], is_policy: bool = False) -> None:
-        tb_prefix = 'ppo_policy' if is_policy else 'ppo_value'
-        step_count = self.c_policy_update if is_policy else self.c_value_update
-        if self.tb_writer is not None:
-            for k, v in stats.items():
-                if isinstance(v, (int, float)):
-                    self.tb_writer.add_scalar(f'{tb_prefix}/{k}', v, step_count)
+        if self.tb_writer is None:
+            return
+
+        self.tb_writer.add_text(tag, text, step)
+
+    def log_stats_to_tensorboard(self, stats: Mapping[Text, Any], step: int, tag: str) -> None:
+        assert tag is not None
+        assert step >= 1
+
+        if self.tb_writer is None:
+            return
+
+        for k, v in stats.items():
+            if isinstance(v, (int, float)):
+                self.tb_writer.add_scalar(f'{tag}/{k}', v, step)
+
+    def state_dict(self) -> Mapping[Text, Any]:
+        return {
+            "iteration": self.c_iteration,
+            "policy_update": self.c_policy_update,
+            "value_update": self.c_value_update,
+            "train_episode": self.c_train_episode,
+            "val_episode": self.c_val_episode,
+            "reward_normalizer_state": self.reward_normalizer.state_dict(),
+            "kl_coef": self.kl_ctl.value,
+        }
+
+    def load_state_dict(self, state: Mapping[Text, Any]) -> None:
+        if "iteration" in state:
+            self.c_iteration = state["iteration"]
+        if "policy_update" in state:
+            self.c_policy_update = state["policy_update"]
+        if "value_update" in state:
+            self.c_value_update = state["value_update"]
+        if "train_episode" in state:
+            self.c_train_episode = state["train_episode"]
+        if "val_episode" in state:
+            self.c_val_episode = state["val_episode"]
+        if "reward_normalizer_state" in state:
+            self.reward_normalizer.load_state_dict(state["reward_normalizer_state"])
+        if "kl_coef" in state:
+            self.kl_ctl.kl_coef = state["kl_coef"]

@@ -74,8 +74,6 @@ local_rank = int(os.environ['LOCAL_RANK'])
 rank = int(os.environ['RANK'])
 world_size = int(os.environ['WORLD_SIZE'])
 
-logger = create_logger(rank=rank)
-
 
 def setup():
     # initialize the process group
@@ -115,7 +113,7 @@ def get_fsdp_mixed_precision_policy(compute_dtype) -> Tuple[ShardedGradScaler, M
     mixed_precision_policy = None  # defaults to fp32
 
     if compute_dtype == torch.bfloat16:
-        logger.info('bFloat16 enabled for FSDP mixed precision ...')
+        print('bFloat16 enabled for FSDP mixed precision ...')
         mixed_precision_policy = MixedPrecision(
             param_dtype=torch.bfloat16,
             # Gradient communication precision.
@@ -124,7 +122,7 @@ def get_fsdp_mixed_precision_policy(compute_dtype) -> Tuple[ShardedGradScaler, M
             buffer_dtype=torch.bfloat16,
         )
     elif compute_dtype == torch.float16:
-        logger.info('float16 enabled for FSDP mixed precision ...')
+        print('float16 enabled for FSDP mixed precision ...')
         # requires grad scaler
         scaler = ShardedGradScaler()
         mixed_precision_policy = MixedPrecision(
@@ -297,6 +295,8 @@ def fsdp_main():
 
     # --------------- Load datasets ---------------
 
+    logger = create_logger(rank=rank)
+
     logger.info('Loading datasets ...')
 
     tokenizer = Tokenizer(cfg.tokenizer_file)
@@ -359,6 +359,8 @@ def fsdp_main():
         max_seq_len=cfg.max_seq_len,
         embed_dropout=cfg.embed_dropout,
         attn_dropout=cfg.attn_dropout,
+        resid_dropout=cfg.resid_dropout,
+        head_dropout=cfg.head_dropout,
     )
 
     assert model_args.head_type == 'lm_head'
@@ -482,9 +484,6 @@ def fsdp_main():
                         best_val_accuracy = val_stats['accuracy']
                         logger.info(f'New best validation accuracy: {val_stats["accuracy"]:.4f}')
                         create_fsdp_full_checkpoint(model, rank, os.path.join(cfg.ckpt_dir, f'{cfg.model_type}-best.pth'))
-
-    # show some training stats.
-    logger.info(f'CUDA Memory Summary After Last training:\n{torch.cuda.memory_summary()}')
 
     # all done, set barrier to ensure all GPU's complete, and then cleanup
     dist.barrier()

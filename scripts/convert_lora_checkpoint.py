@@ -137,13 +137,6 @@ if __name__ == '__main__':
     # fine-tuned model
     merge_lora_checkpoint(
         base_ckpt_path='/home/michael/models/meta_llama2/llama-2-7b/consolidated.pth',
-        lora_ckpt_path='./checkpoints/sft_lora/lora_7B-steps-6000.pth',
-        save_path='./checkpoints/sft/7B-steps-6000.pth',
-    )
-
-    # PPO models
-    merge_lora_checkpoint(
-        base_ckpt_path='./checkpoints/sft/7B-steps-6000.pth',
-        lora_ckpt_path='./checkpoints/rlhf_lora/lora_7B-epoch-60.pth',
-        save_path='./checkpoints/rlhf/7B-epoch-60.pth',
+        lora_ckpt_path='./checkpoints/sft_lora/7B/lora_7B-steps-3500.pth',
+        save_path='./checkpoints/best/sft_lora/7B/7B-steps-3500-merged.pth',
     )
